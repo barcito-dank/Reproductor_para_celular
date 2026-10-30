@@ -125,6 +125,15 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [isMiniPanel, library, allTracksAlbum])
 
+  // Precargar cola de reproducción inicial cuando aún no suena ninguna pista para sincronizar el MiniPanel desde el arranque
+  useEffect(() => {
+    if (isMiniPanel) return
+    if (!currentTrack && selectedAlbum?.tracks?.length > 0) {
+      setPlaylist(selectedAlbum.tracks)
+      setCurrentAlbum(selectedAlbum)
+    }
+  }, [isMiniPanel, currentTrack, selectedAlbum])
+
   const updateMusicDirectory = useCallback(async (directory) => {
     window.localStorage.setItem('musicPlayerDirectory', directory)
     setMusicDirectory(directory)
@@ -291,10 +300,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     loadAndPlayTrack(track, album, index)
   }, [currentTrack, currentAlbum, playlistIndex, loadAndPlayTrack, buildShuffledIndices])
 
-  // Alternar reproducir/pausar
+  // Alternar reproducir/pausar (inicia la cola activa si aún no hay pista seleccionada)
   const togglePlay = useCallback(() => {
     const audio = audioRef.current
-    if (!currentTrack) return
+    if (!currentTrack) {
+      const candidateList = playlist.length > 0 ? playlist : (selectedAlbum?.tracks || [])
+      if (candidateList.length > 0) {
+        const startIdx = shuffle ? Math.floor(Math.random() * candidateList.length) : 0
+        playTrack(candidateList[startIdx], currentAlbum || selectedAlbum, candidateList, startIdx)
+      }
+      return
+    }
     initAudioAnalyser()
     if (audio.paused) {
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
@@ -310,7 +326,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.pause()
       setIsPlaying(false)
     }
-  }, [currentTrack, initAudioAnalyser])
+  }, [currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser])
 
   // Navegar a posición de tiempo (scrubbing)
   const seekTo = useCallback((time) => {
@@ -523,9 +539,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     const onTimeUpdate = () => {
       const t = audio.currentTime
       setCurrentTime(t)
-      // Throttling de alta frecuencia de tiempo hacia Electron (~500ms) para evitar saturación de IPC
+      // Throttling equilibrado (~250ms) para fluidez visual en MiniPanel sin saturar IPC
       const now = performance.now()
-      if (now - lastTimeSyncRef.current >= 500) {
+      if (now - lastTimeSyncRef.current >= 250) {
         lastTimeSyncRef.current = now
         window.electronAPI.sendPlayerTime?.(t)
       }
@@ -570,10 +586,10 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [handleTrackEnd, volume])
 
-  // Sincronizar estado con otras ventanas (Mini Panel) SOLO cuando cambia la pista o controles
+  // Sincronizar estado con otras ventanas (Mini Panel) desde el inicio y ante cambios de controles o pista
   // Optimización de payload: la playlist completa solo se transfiere cuando realmente cambia la referencia
   useEffect(() => {
-    if (!isMiniPanel && currentTrack) {
+    if (!isMiniPanel && !isLoading) {
       const playlistChanged = lastSentPlaylistRef.current !== playlist
       if (playlistChanged) {
         lastSentPlaylistRef.current = playlist
@@ -592,7 +608,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         volume
       })
     }
-  }, [isMiniPanel, currentTrack, currentAlbum, playlist, playlistIndex, isPlaying, duration, shuffle, loop, volume])
+  }, [isMiniPanel, isLoading, currentTrack, currentAlbum, playlist, playlistIndex, isPlaying, duration, shuffle, loop, volume])
 
   // Cargar estado inicial si estamos en la ventana Mini Panel
   useEffect(() => {

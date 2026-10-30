@@ -116,21 +116,22 @@ function PlayerTimeline({ duration, isPlaying, seekTo }) {
         onMouseMove={handleMouseMoveHover}
         onMouseLeave={handleMouseLeaveHover}
       >
-        {/* Halo de resplandor ambiental inferior */}
+        {/* Halo de resplandor ambiental inferior acelerado por GPU (scaleX evita re-calcular blur en cada tick) */}
         <div
           className="progress-ambient-glow"
-          style={{ width: `${progressPercent}%` }}
+          style={{ transform: `translateY(-50%) scaleX(${progressPercent / 100})` }}
         />
 
         <div className="progress-bar-track">
           {/* Marcas sutiles de ondas (Audio Ticks) en el fondo del track */}
           <div className="progress-audio-ticks" />
 
-          {/* Relleno con gradiente neón vibrante y onda de luz */}
+          {/* Relleno con gradiente neón vibrante y onda de luz compuesta en GPU */}
           <div
             className={`progress-bar-fill ${isPlaying ? 'shimmer-active' : ''}`}
             style={{ width: `${progressPercent}%` }}
           >
+            <div className="progress-shimmer-clip" />
             {/* Cabeza de luz láser brillante en el extremo */}
             <div className="progress-glow-head" />
             {/* Indicador circular deslizable (Thumb) */}
@@ -227,7 +228,7 @@ function Player() {
         {/* 1. Track Info (Carátula grande, título, artista) */}
       <div className="player-track-info">
         {currentTrack?.cover ? (
-          <img src={currentTrack.cover} alt="" className="player-cover" />
+          <img src={currentTrack.cover} alt="" className="player-cover" decoding="async" />
         ) : (
           <div className="player-cover-placeholder">💿</div>
         )}

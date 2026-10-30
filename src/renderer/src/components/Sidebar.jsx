@@ -6,10 +6,10 @@ import React, { useState, useMemo, useCallback } from 'react'
  * - Tipo 'folder': Barra desplegable estilizada sin imagen
  * - Tipo 'album': Tarjeta de álbum con miniatura de carátula
  */
-function TreeNode({
+const TreeNode = React.memo(function TreeNode({
   node,
   depth = 0,
-  selectedAlbum,
+  selectedAlbumId,
   onSelectAlbum,
   expandedFolders,
   onToggleFolder,
@@ -53,7 +53,7 @@ function TreeNode({
                 key={child.id}
                 node={child}
                 depth={depth + 1}
-                selectedAlbum={selectedAlbum}
+                selectedAlbumId={selectedAlbumId}
                 onSelectAlbum={onSelectAlbum}
                 expandedFolders={expandedFolders}
                 onToggleFolder={onToggleFolder}
@@ -67,7 +67,7 @@ function TreeNode({
   }
 
   // Nodo Tipo 'album': Álbum convencional con portada
-  const isSelected = selectedAlbum?.id === node.id
+  const isSelected = selectedAlbumId === node.id
 
   return (
     <div
@@ -76,7 +76,7 @@ function TreeNode({
       title={`${node.name} (${node.trackCount} pistas)`}
     >
       {node.cover ? (
-        <img src={node.cover} alt={node.name} className="album-item-cover" />
+        <img src={node.cover} alt={node.name} className="album-item-cover" loading="lazy" decoding="async" />
       ) : (
         <div className="album-item-cover-placeholder">💿</div>
       )}
@@ -86,7 +86,7 @@ function TreeNode({
       </div>
     </div>
   )
-}
+})
 
 function Sidebar({ isOpen = true, onToggle }) {
   const { library, selectedAlbum, setSelectedAlbum, isLoading } = usePlayer()
@@ -231,7 +231,7 @@ function Sidebar({ isOpen = true, onToggle }) {
             key={node.id}
             node={node}
             depth={0}
-            selectedAlbum={selectedAlbum}
+            selectedAlbumId={selectedAlbum?.id}
             onSelectAlbum={setSelectedAlbum}
             expandedFolders={expandedFolders}
             onToggleFolder={handleToggleFolder}

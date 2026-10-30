@@ -8,17 +8,26 @@ import { registerHotkeys, unregisterHotkeys, HOTKEY_CONFIG } from './hotkeys'
 let mainWindow = null
 let sidePanel = null
 let notificationWindow = null
+let sidePanelMode = 'hidden' // 'hidden' | 'marker' | 'expanded'
 let isSidePanelExpanded = false
 let isMarkerShowing = false
+let isSidePanelReady = false
+let pendingSidePanelMode = null
+let lastIgnoreMouseEvents = null
+let currentSidePanelBounds = null
+let expandGraceUntil = 0
+let collapseCooldownUntil = 0
+let lastBlurCollapseAt = 0
+let minimizeDeferTimeout = null
 let isNotifLoaded = false
 let edgeCheckTimeout = null
 let hideMarkerTimeout = null
-let markerAnimationTimeout = null
 let notifTimeout = null
 let notifHideTimeout = null
 let lastTrackId = null
 let lastPlayerState = null
 let lastPlaylist = []
+let lastCurrentTime = 0
 
 // Opciones de configuración de la barra lateral
 let panelSettings = {
@@ -28,10 +37,9 @@ let panelSettings = {
 
 const DRAWER_WIDTH = 340
 const MARKER_TAB_WIDTH = 36
+const MARKER_TAB_HEIGHT = 74
 const GLOW_BUFFER = 12
-const TOTAL_EXPANDED_WIDTH = DRAWER_WIDTH + MARKER_TAB_WIDTH + GLOW_BUFFER // 388px (cajón + marcador + margen para resplandor)
-const SMALL_MARKER_WIN_WIDTH = MARKER_TAB_WIDTH + GLOW_BUFFER // 48px
-const SMALL_MARKER_WIN_HEIGHT = 86
+const TOTAL_EXPANDED_WIDTH = DRAWER_WIDTH + MARKER_TAB_WIDTH + GLOW_BUFFER // 388px (cajón + marcador + margen para sombra)
 const NOTIF_WIDTH = 380
 const NOTIF_HEIGHT = 74
 
@@ -78,7 +86,13 @@ function createMainWindow() {
   }
 
   mainWindow.on('minimize', () => {
-    setSidePanelBounds('expanded')
+    expandGraceUntil = Date.now() + 500
+    if (!isSidePanelExpanded) {
+      setSidePanelBounds('expanded')
+    } else if (sidePanel && !sidePanel.isDestroyed()) {
+      sidePanel.moveTop()
+      sidePanel.focus()
+    }
   })
 
   mainWindow.on('restore', () => {
@@ -100,19 +114,70 @@ function createMainWindow() {
   })
 }
 
+/**
+ * Sincroniza la geometría fija de la ventana del panel lateral solo si cambia el monitor o resolución.
+ * Evita redimensionar el buffer DirectComposition (setBounds) en cada transición marker <-> expanded,
+ * eliminando el salto horizontal del marcador y la latencia de despliegue.
+ */
+function syncSidePanelDisplayBounds(display) {
+  if (!sidePanel || sidePanel.isDestroyed() || !display) return
+  const { x: dispX, y: dispY, width: screenWidth, height: screenHeight } = display.bounds
+  const nextBounds = {
+    x: dispX + screenWidth - TOTAL_EXPANDED_WIDTH,
+    y: dispY,
+    width: TOTAL_EXPANDED_WIDTH,
+    height: screenHeight
+  }
+
+  if (
+    !currentSidePanelBounds ||
+    currentSidePanelBounds.x !== nextBounds.x ||
+    currentSidePanelBounds.y !== nextBounds.y ||
+    currentSidePanelBounds.width !== nextBounds.width ||
+    currentSidePanelBounds.height !== nextBounds.height
+  ) {
+    sidePanel.setBounds(nextBounds)
+    currentSidePanelBounds = nextBounds
+  }
+}
+
+/**
+ * Actualiza el paso de eventos de ratón a través de la ventana transparente únicamente cuando cambia de estado,
+ * evitando llamadas redundantes a Win32 SetWindowLongPtr.
+ */
+function setSidePanelIgnoreMouse(ignore) {
+  if (!sidePanel || sidePanel.isDestroyed()) return
+  if (lastIgnoreMouseEvents === ignore) return
+  lastIgnoreMouseEvents = ignore
+  sidePanel.setIgnoreMouseEvents(ignore)
+}
+
+function broadcastSidePanelMode(mode) {
+  if (sidePanel && !sidePanel.isDestroyed()) {
+    sidePanel.webContents.send('side-panel-mode-changed', mode)
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('side-panel-mode-changed', mode)
+  }
+}
+
 function createSidePanel() {
   const primaryDisplay = screen.getPrimaryDisplay()
   const { x: dispX, y: dispY, width: screenWidth, height: screenHeight } = primaryDisplay.bounds
-  const markerY = dispY + Math.floor(screenHeight * 0.20)
+  const initialBounds = {
+    x: dispX + screenWidth - TOTAL_EXPANDED_WIDTH,
+    y: dispY,
+    width: TOTAL_EXPANDED_WIDTH,
+    height: screenHeight
+  }
 
   sidePanel = new BrowserWindow({
-    width: SMALL_MARKER_WIN_WIDTH,
-    height: SMALL_MARKER_WIN_HEIGHT,
-    x: dispX + screenWidth - SMALL_MARKER_WIN_WIDTH,
-    y: markerY,
+    ...initialBounds,
     frame: false,
     transparent: true,
     resizable: false,
+    movable: false,
+    hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     show: false,
@@ -121,13 +186,35 @@ function createSidePanel() {
       preload: getPreloadPath(),
       sandbox: false,
       webSecurity: false,
-      backgroundThrottling: true
+      backgroundThrottling: false // Mantener compositor GPU caliente para despliegue instantáneo (0ms)
     }
   })
 
-  // Prioridad máxima sobre juegos a pantalla completa o sin bordes (League of Legends)
-  sidePanel.setAlwaysOnTop(true, 'screen-saver', 1)
+  currentSidePanelBounds = initialBounds
+  isSidePanelReady = false
+  lastIgnoreMouseEvents = null
+
+  // Prioridad Z superior (nivel 2 en 'screen-saver') por encima de notificaciones y juegos pantalla completa
+  sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
   sidePanel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  setSidePanelIgnoreMouse(true)
+
+  sidePanel.webContents.once('did-finish-load', () => {
+    if (!sidePanel || sidePanel.isDestroyed()) return
+    isSidePanelReady = true
+    // Pre-calentar superficie DirectComposition transparente sin robar foco (0% uso GPU en reposo)
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    sidePanel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    sidePanel.showInactive()
+
+    if (pendingSidePanelMode) {
+      const targetMode = pendingSidePanelMode
+      pendingSidePanelMode = null
+      setSidePanelBounds(targetMode)
+    } else {
+      broadcastSidePanelMode(sidePanelMode)
+    }
+  })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     sidePanel.loadURL(process.env['ELECTRON_RENDERER_URL'] + '#/mini')
@@ -135,63 +222,25 @@ function createSidePanel() {
     sidePanel.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: '/mini' })
   }
 
-  // Ocultación automática al tocar otra cosa que no sea la aplicación (blur)
+  // Ocultación automática al tocar otra cosa que no sea la aplicación (blur),
+  // respetando la ventana de gracia durante la transición de minimizado de Windows
   sidePanel.on('blur', () => {
+    if (Date.now() < expandGraceUntil) return
     if (isSidePanelExpanded && panelSettings.autoHide && !panelSettings.pinned) {
-      sidePanel.webContents.send('side-panel-request-collapse')
+      lastBlurCollapseAt = Date.now()
+      setSidePanelBounds('collapsed')
     }
   })
 
   sidePanel.on('closed', () => {
     sidePanel = null
+    sidePanelMode = 'hidden'
     isSidePanelExpanded = false
     isMarkerShowing = false
+    isSidePanelReady = false
+    currentSidePanelBounds = null
+    lastIgnoreMouseEvents = null
   })
-}
-
-/**
- * Muestra el marcador chico situado en la parte superior derecha (~20% del alto)
- * con prioridad máxima por encima de cualquier juego a pantalla completa sin quitarle el foco
- */
-function showMarkerWindow(dispX, screenWidth, markerY) {
-  if (!sidePanel || sidePanel.isDestroyed() || isSidePanelExpanded) return
-
-  sidePanel.setBounds({
-    x: dispX + screenWidth - SMALL_MARKER_WIN_WIDTH,
-    y: markerY,
-    width: SMALL_MARKER_WIN_WIDTH,
-    height: SMALL_MARKER_WIN_HEIGHT
-  })
-
-  // Reforzar prioridad 'screen-saver' para superponerse a juegos como LoL
-  sidePanel.setAlwaysOnTop(true, 'screen-saver', 1)
-  sidePanel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-  sidePanel.showInactive()
-  sidePanel.moveTop()
-
-  if (!isMarkerShowing) {
-    sidePanel.webContents.send('side-panel-mode-changed', 'marker')
-    isMarkerShowing = true
-  }
-}
-
-/**
- * Oculta el marcador chico cuando el cursor se aleja con animación rápida de salida
- */
-function hideMarkerWindow() {
-  if (!sidePanel || sidePanel.isDestroyed() || isSidePanelExpanded) return
-
-  if (isMarkerShowing) {
-    sidePanel.webContents.send('side-panel-mode-changed', 'hiding-marker')
-    if (markerAnimationTimeout) clearTimeout(markerAnimationTimeout)
-    markerAnimationTimeout = setTimeout(() => {
-      if (!isSidePanelExpanded && !isMarkerShowing && sidePanel && !sidePanel.isDestroyed()) {
-        sidePanel.hide()
-      }
-      markerAnimationTimeout = null
-    }, 180)
-    isMarkerShowing = false
-  }
 }
 
 function createNotificationWindow() {
@@ -206,6 +255,7 @@ function createNotificationWindow() {
     frame: false,
     transparent: true,
     resizable: false,
+    hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     show: false,
@@ -214,11 +264,11 @@ function createNotificationWindow() {
       preload: getPreloadPath(),
       sandbox: false,
       webSecurity: false,
-      backgroundThrottling: true
+      backgroundThrottling: false
     }
   })
 
-  notificationWindow.setAlwaysOnTop(true, 'screen-saver', 0)
+  notificationWindow.setAlwaysOnTop(true, 'screen-saver', 1)
   notificationWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   notificationWindow.setIgnoreMouseEvents(true, { forward: true })
   notificationWindow.webContents.on('did-finish-load', () => {
@@ -261,15 +311,15 @@ function showTrackNotification(track) {
     width: NOTIF_WIDTH,
     height: NOTIF_HEIGHT
   })
-  notificationWindow.setAlwaysOnTop(true, 'screen-saver', 0)
+  notificationWindow.setAlwaysOnTop(true, 'screen-saver', 1)
   notificationWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   notificationWindow.setIgnoreMouseEvents(true, { forward: true })
   notificationWindow.showInactive()
 
-  // Mantener el orden Z del marcador tras mostrar el globo en Windows.
+  // Mantener el orden Z estricto del panel lateral por encima de las notificaciones
   if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
-  sidePanel.setAlwaysOnTop(true, 'screen-saver', 1)
-  sidePanel.moveTop()
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    sidePanel.moveTop()
   }
 
   const emitToast = () => {
@@ -302,61 +352,122 @@ function showTrackNotification(track) {
 }
 
 /**
- * Detector adaptativo de proximidad del ratón al borde derecho de la pantalla.
- * En reposo/lejos sondea a baja frecuencia (350ms) para no consumir CPU ni despertar
- * innecesariamente al procesador. Al acercarse el cursor al área lateral derecha,
- * acelera a alta reactividad (75ms).
+ * Detector adaptativo de proximidad con corredor de histéresis y hit-testing por píxel:
+ * - Evita que el marcador entre y salga erráticamente cuando el usuario mueve el cursor en diagonal hacia él.
+ * - Mantiene click-through total (WS_EX_TRANSPARENT) fuera del área exacta del marcador o del cajón.
  */
-function scheduleNextEdgeCheck(delay = 75) {
+function scheduleNextEdgeCheck(delay = 32) {
   if (edgeCheckTimeout) clearTimeout(edgeCheckTimeout)
   edgeCheckTimeout = setTimeout(checkEdgeProximity, delay)
 }
 
 function checkEdgeProximity() {
-  if (!sidePanel || sidePanel.isDestroyed()) {
-    scheduleNextEdgeCheck(400)
-    return
-  }
-
-  // Si la barra ya está desplegada, comprobamos a baja frecuencia
-  if (isSidePanelExpanded) {
-    scheduleNextEdgeCheck(350)
+  if (!sidePanel || sidePanel.isDestroyed() || !isSidePanelReady) {
+    scheduleNextEdgeCheck(120)
     return
   }
 
   const point = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(point) || screen.getPrimaryDisplay()
   const { x: dispX, y: dispY, width: screenWidth, height: screenHeight } = display.bounds
-  const markerY = dispY + Math.floor(screenHeight * 0.20)
-  const distanceToRight = (dispX + screenWidth) - point.x
+  const rightEdge = dispX + screenWidth
+  const markerTop = dispY + Math.round(screenHeight * 0.20)
+  const markerBottom = markerTop + MARKER_TAB_HEIGHT
+  const distanceToRight = rightEdge - point.x
 
-  // Ratón cerca de cualquier parte del borde derecho de la pantalla actual (<= 14px)
-  const isNearRightEdge = point.x >= dispX + screenWidth - 14
-  // O ratón sobrevolando el área donde está el marcador
-  const isOverMarker = point.x >= dispX + screenWidth - (SMALL_MARKER_WIN_WIDTH + 14) &&
-                       point.y >= markerY - 14 &&
-                       point.y <= markerY + SMALL_MARKER_WIN_HEIGHT + 14
+  // 1. Si el panel está desplegado: gestionar hit-testing limpio para dejar pasar clics en la franja izquierda vacía
+  if (isSidePanelExpanded) {
+    const activeBounds = currentSidePanelBounds || {
+      x: rightEdge - TOTAL_EXPANDED_WIDTH,
+      y: dispY,
+      width: TOTAL_EXPANDED_WIDTH,
+      height: screenHeight
+    }
+    const panelRight = activeBounds.x + activeBounds.width
+    const drawerLeft = panelRight - DRAWER_WIDTH
+    const expMarkerLeft = drawerLeft - MARKER_TAB_WIDTH - 6
+    const expMarkerTop = activeBounds.y + Math.round(activeBounds.height * 0.20)
+    const expMarkerBottom = expMarkerTop + MARKER_TAB_HEIGHT
 
-  if (isNearRightEdge || isOverMarker) {
+    const inDrawer =
+      point.x >= drawerLeft &&
+      point.x <= panelRight + 4 &&
+      point.y >= activeBounds.y &&
+      point.y <= activeBounds.y + activeBounds.height
+
+    const inExpandedMarker =
+      point.x >= expMarkerLeft &&
+      point.x < drawerLeft &&
+      point.y >= expMarkerTop - 8 &&
+      point.y <= expMarkerBottom + 8
+
+    setSidePanelIgnoreMouse(!(inDrawer || inExpandedMarker))
+
+    const nearPanelSeam = Math.abs(point.x - drawerLeft) <= 70
+    scheduleNextEdgeCheck(nearPanelSeam ? 28 : 120)
+    return
+  }
+
+  // Liberar anticipadamente el cooldown tras plegar si el ratón ya se alejó del borde
+  if (collapseCooldownUntil > 0 && distanceToRight > 95) {
+    collapseCooldownUntil = 0
+  }
+  const inCooldown = Date.now() < collapseCooldownUntil
+
+  // Área interactiva exacta del marcador cuando asoma en el borde derecho
+  const overCollapsedMarker =
+    distanceToRight >= -4 &&
+    distanceToRight <= MARKER_TAB_WIDTH + 8 &&
+    point.y >= markerTop - 8 &&
+    point.y <= markerBottom + 8
+
+  if (!isMarkerShowing) {
+    const triggerNearEdge = !inCooldown && distanceToRight >= -4 && distanceToRight <= 14
+    const triggerOverMarker = !inCooldown && overCollapsedMarker
+
+    if (triggerNearEdge || triggerOverMarker) {
+      if (hideMarkerTimeout) {
+        clearTimeout(hideMarkerTimeout)
+        hideMarkerTimeout = null
+      }
+      syncSidePanelDisplayBounds(display)
+      setSidePanelIgnoreMouse(!overCollapsedMarker)
+      setSidePanelBounds('marker')
+      scheduleNextEdgeCheck(28)
+      return
+    }
+
+    setSidePanelIgnoreMouse(true)
+    scheduleNextEdgeCheck(distanceToRight <= 220 ? 32 : 110)
+    return
+  }
+
+  // 2. El marcador ya está visible: aplicar corredor amplio de histéresis para cero parpadeo/rebote
+  setSidePanelIgnoreMouse(!overCollapsedMarker)
+
+  const inRightCorridor = distanceToRight >= -8 && distanceToRight <= 92
+  const inMarkerHalo =
+    distanceToRight >= -8 &&
+    distanceToRight <= 145 &&
+    point.y >= markerTop - 55 &&
+    point.y <= markerBottom + 55
+
+  if (inRightCorridor || inMarkerHalo) {
     if (hideMarkerTimeout) {
       clearTimeout(hideMarkerTimeout)
       hideMarkerTimeout = null
     }
-    showMarkerWindow(dispX, screenWidth, markerY)
-    scheduleNextEdgeCheck(75)
-  } else if (isMarkerShowing) {
+    scheduleNextEdgeCheck(28)
+  } else {
     if (!hideMarkerTimeout) {
       hideMarkerTimeout = setTimeout(() => {
-        hideMarkerWindow()
         hideMarkerTimeout = null
-      }, 280) // Desaparece ágilmente tras 280ms de gracia
+        if (!isSidePanelExpanded && isMarkerShowing) {
+          setSidePanelBounds('collapsed')
+        }
+      }, 210)
     }
-    scheduleNextEdgeCheck(75)
-  } else {
-    // Adaptativo: si el cursor está lejos (> 160px del borde), chequear cada 350ms.
-    // Si se acerca a la zona derecha (<= 160px), acelerar a 80ms.
-    const nextDelay = distanceToRight <= 160 ? 80 : 350
-    scheduleNextEdgeCheck(nextDelay)
+    scheduleNextEdgeCheck(32)
   }
 }
 
@@ -365,51 +476,101 @@ function startEdgeDetection() {
   checkEdgeProximity()
 }
 
-function setSidePanelBounds(mode) {
+function setSidePanelBounds(mode, options = {}) {
   if (!sidePanel || sidePanel.isDestroyed()) return
+
+  const normalizedMode =
+    mode === 'expanded' ? 'expanded' : mode === 'marker' ? 'marker' : 'hidden'
+
+  if (!isSidePanelReady) {
+    pendingSidePanelMode = normalizedMode
+    return
+  }
+
+  if (hideMarkerTimeout) {
+    clearTimeout(hideMarkerTimeout)
+    hideMarkerTimeout = null
+  }
+
   const point = screen.getCursorScreenPoint()
   const display = screen.getDisplayNearestPoint(point) || screen.getPrimaryDisplay()
-  const { x: dispX, y: dispY, width: screenWidth, height: screenHeight } = display.bounds
-  const markerY = dispY + Math.floor(screenHeight * 0.20)
 
-  if (mode === 'expanded') {
+  if (normalizedMode === 'expanded') {
+    syncSidePanelDisplayBounds(display)
+    sidePanelMode = 'expanded'
     isSidePanelExpanded = true
     isMarkerShowing = false
-    sidePanel.setBounds({
-      x: dispX + screenWidth - TOTAL_EXPANDED_WIDTH,
-      y: dispY,
-      width: TOTAL_EXPANDED_WIDTH,
-      height: screenHeight
-    })
-    sidePanel.setAlwaysOnTop(true, 'screen-saver', 1)
-    sidePanel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    sidePanel.show()
+    collapseCooldownUntil = 0
+
+    if (!options.preserveGrace) {
+      expandGraceUntil = Math.max(expandGraceUntil, Date.now() + 220)
+    }
+
+    setSidePanelIgnoreMouse(false)
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    if (!sidePanel.isVisible()) {
+      sidePanel.showInactive()
+    }
     sidePanel.moveTop()
-    sidePanel.focus()
-    sidePanel.webContents.send('side-panel-mode-changed', 'expanded')
-  } else if (mode === 'marker') {
+    if (!options.skipFocus) {
+      sidePanel.focus()
+    }
+
+    // Sincronizar tiempo exacto de reproducción antes del frame de apertura para evitar saltos en la barra
+    sidePanel.webContents.send('player-time-sync', lastCurrentTime)
+    broadcastSidePanelMode('expanded')
+    scheduleNextEdgeCheck(40)
+  } else if (normalizedMode === 'marker') {
+    syncSidePanelDisplayBounds(display)
+    const wasMarker = sidePanelMode === 'marker'
+    sidePanelMode = 'marker'
     isSidePanelExpanded = false
-    showMarkerWindow(dispX, screenWidth, markerY)
-    scheduleNextEdgeCheck(75)
+    isMarkerShowing = true
+
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    if (!sidePanel.isVisible()) {
+      sidePanel.showInactive()
+    }
+    sidePanel.moveTop()
+
+    if (!wasMarker) {
+      sidePanel.webContents.send('player-time-sync', lastCurrentTime)
+      broadcastSidePanelMode('marker')
+    }
+    scheduleNextEdgeCheck(28)
   } else {
-    // 'collapsed'
+    // 'hidden' / 'collapsed'
+    if (options.cooldown) {
+      collapseCooldownUntil = Date.now() + 420
+    }
+    const wasHidden = sidePanelMode === 'hidden'
+    sidePanelMode = 'hidden'
     isSidePanelExpanded = false
     isMarkerShowing = false
-    sidePanel.webContents.send('side-panel-mode-changed', 'hidden')
-    sidePanel.hide()
-    scheduleNextEdgeCheck(150)
+    setSidePanelIgnoreMouse(true)
+
+    if (!wasHidden) {
+      broadcastSidePanelMode('hidden')
+    }
+    scheduleNextEdgeCheck(60)
   }
 }
 
-function toggleSidePanel() {
+function toggleSidePanel(fromUIButton = false) {
   if (!sidePanel || sidePanel.isDestroyed()) {
     createSidePanel()
+  }
+
+  // Si hacer mousedown en el botón "Panel Rápido" de la ventana principal acaba de disparar blur y cerrarlo,
+  // evitar que el click (mouseup) posterior lo vuelva a abrir por accidente
+  if (fromUIButton && !isSidePanelExpanded && Date.now() - lastBlurCollapseAt < 320) {
+    return
   }
 
   if (!isSidePanelExpanded) {
     setSidePanelBounds('expanded')
   } else {
-    sidePanel.webContents.send('side-panel-request-collapse')
+    setSidePanelBounds('collapsed', { cooldown: true })
   }
 }
 
@@ -453,7 +614,25 @@ ipcMain.handle('scan-music', async (_, selectedDirectory) => {
 })
 
 ipcMain.on('window-minimize', () => {
-  if (mainWindow) mainWindow.minimize()
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  // Desplegar el panel lateral ANTES de iniciar la animación de minimizado de Windows
+  // para que la transición sea instantánea y simultánea sin bloqueo de DWM
+  expandGraceUntil = Date.now() + 650
+  setSidePanelBounds('expanded', { skipFocus: true, preserveGrace: true })
+
+  if (minimizeDeferTimeout) clearTimeout(minimizeDeferTimeout)
+  minimizeDeferTimeout = setTimeout(() => {
+    minimizeDeferTimeout = null
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
+      mainWindow.minimize()
+    }
+    setTimeout(() => {
+      if (isSidePanelExpanded && sidePanel && !sidePanel.isDestroyed()) {
+        sidePanel.moveTop()
+        sidePanel.focus()
+      }
+    }, 180)
+  }, 16)
 })
 
 ipcMain.on('window-maximize', () => {
@@ -471,17 +650,21 @@ ipcMain.on('window-close', () => {
 })
 
 ipcMain.on('toggle-side-panel', () => {
-  toggleSidePanel()
+  toggleSidePanel(true)
 })
 
 ipcMain.on('set-side-panel-mode', (_, mode) => {
-  setSidePanelBounds(mode)
+  const isManualCollapse = mode === 'collapsed' || mode === 'hidden'
+  setSidePanelBounds(mode, { cooldown: isManualCollapse })
 })
 
 ipcMain.on('update-panel-settings', (_, newSettings) => {
   panelSettings = { ...panelSettings, ...newSettings }
   if (sidePanel && !sidePanel.isDestroyed()) {
     sidePanel.webContents.send('panel-settings-updated', panelSettings)
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('panel-settings-updated', panelSettings)
   }
 })
 
@@ -490,9 +673,16 @@ ipcMain.handle('get-panel-settings', () => {
 })
 
 ipcMain.on('restore-main-window', () => {
-  if (mainWindow) {
-    mainWindow.restore()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore()
+    } else {
+      mainWindow.show()
+    }
     mainWindow.focus()
+    if (panelSettings.autoHide && !panelSettings.pinned) {
+      setSidePanelBounds('collapsed', { cooldown: true })
+    }
   }
 })
 
@@ -501,6 +691,9 @@ ipcMain.on('player-state-update', (event, state) => {
   if (state) {
     if (state.playlist !== undefined) {
       lastPlaylist = state.playlist
+    }
+    if (typeof state.currentTime === 'number') {
+      lastCurrentTime = state.currentTime
     }
     lastPlayerState = { ...lastPlayerState, ...state }
   }
@@ -525,8 +718,11 @@ ipcMain.on('player-state-update', (event, state) => {
 })
 
 // Sincronización ligera de alta frecuencia de tiempo:
-// Solo se envía al sidePanel si está desplegado o mostrando el marcador para ahorrar ciclos de CPU
+// Siempre guarda lastCurrentTime y solo despacha IPC cuando el panel/marcador está activo
 ipcMain.on('player-time-update', (event, time) => {
+  if (typeof time === 'number') {
+    lastCurrentTime = time
+  }
   if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
     sidePanel.webContents.send('player-time-sync', time)
   }
@@ -537,7 +733,7 @@ ipcMain.on('player-time-update', (event, time) => {
 
 ipcMain.handle('get-initial-player-state', () => {
   if (!lastPlayerState) return null
-  return { ...lastPlayerState, playlist: lastPlaylist }
+  return { ...lastPlayerState, currentTime: lastCurrentTime, playlist: lastPlaylist }
 })
 
 ipcMain.on('show-track-notification', (_, track) => {
@@ -551,13 +747,21 @@ ipcMain.on('player-command', (event, command) => {
   if (sidePanel && !sidePanel.isDestroyed()) {
     sidePanel.webContents.send('player-command', command)
   }
+  if (notificationWindow && !notificationWindow.isDestroyed()) {
+    notificationWindow.webContents.send('player-command', command)
+  }
 })
 
 ipcMain.handle('toggle-main-always-on-top', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false
   const currentState = mainWindow.isAlwaysOnTop()
   const newState = !currentState
-  mainWindow.setAlwaysOnTop(newState, 'screen-saver')
+  // Nivel 'pop-up-menu' mantiene la ventana sobre apps normales, pero debajo de notificaciones (nivel 1) y panel lateral (nivel 2)
+  mainWindow.setAlwaysOnTop(newState, 'pop-up-menu')
+  if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    sidePanel.moveTop()
+  }
   return newState
 })
 
@@ -580,6 +784,17 @@ app.whenReady().then(() => {
   createSidePanel()
   // createNotificationWindow() se carga bajo demanda al sonar la primera pista (ahorra ~90MB RAM al inicio)
   startEdgeDetection()
+
+  const handleDisplayChange = () => {
+    if (!sidePanel || sidePanel.isDestroyed()) return
+    const point = screen.getCursorScreenPoint()
+    const display = screen.getDisplayNearestPoint(point) || screen.getPrimaryDisplay()
+    currentSidePanelBounds = null
+    syncSidePanelDisplayBounds(display)
+  }
+  screen.on('display-metrics-changed', handleDisplayChange)
+  screen.on('display-added', handleDisplayChange)
+  screen.on('display-removed', handleDisplayChange)
 
   const sendCommand = (cmd) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -605,12 +820,12 @@ app.whenReady().then(() => {
 app.on('will-quit', () => {
   if (edgeCheckTimeout) clearTimeout(edgeCheckTimeout)
   if (hideMarkerTimeout) clearTimeout(hideMarkerTimeout)
-  if (markerAnimationTimeout) clearTimeout(markerAnimationTimeout)
+  if (minimizeDeferTimeout) clearTimeout(minimizeDeferTimeout)
   if (notifTimeout) clearTimeout(notifTimeout)
   if (notifHideTimeout) clearTimeout(notifHideTimeout)
   edgeCheckTimeout = null
   hideMarkerTimeout = null
-  markerAnimationTimeout = null
+  minimizeDeferTimeout = null
   notifTimeout = null
   notifHideTimeout = null
   unregisterHotkeys()

@@ -19,6 +19,59 @@ function AnimatedEqualizer({ isPaused = false }) {
   )
 }
 
+const TrackRow = React.memo(function TrackRow({
+  track,
+  index,
+  isActive,
+  isPlaying,
+  onSelectTrack
+}) {
+  return (
+    <li
+      className={`track-item ${isActive ? 'active' : ''}`}
+      onClick={() => onSelectTrack(track, index)}
+    >
+      {/* Número o Indicador de Ecualizador Animado */}
+      <div className="track-number">
+        {isActive ? (
+          <AnimatedEqualizer isPaused={!isPlaying} />
+        ) : (
+          <span className="track-index-num">{index + 1}</span>
+        )}
+      </div>
+
+      {/* Miniatura de la Imagen de la Canción con Hover Play */}
+      <div className="track-cover-container">
+        {track.cover ? (
+          <img
+            src={track.cover}
+            alt=""
+            className="track-thumb-img"
+            loading="lazy"
+            decoding="async"
+          />
+        ) : (
+          <div className="track-thumb-fallback">🎵</div>
+        )}
+        <div className="track-thumb-hover-overlay">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        </div>
+      </div>
+
+      {/* Título y Artista */}
+      <div className="track-info">
+        <div className="track-title" title={track.title}>{track.title}</div>
+        <div className="track-artist" title={track.artist}>{track.artist}</div>
+      </div>
+
+      {/* Duración */}
+      <span className="track-duration">{formatTime(track.duration)}</span>
+    </li>
+  )
+})
+
 function AlbumView() {
   const { selectedAlbum, playAlbum, playTrack, currentTrack, isPlaying, isLoading, library } = usePlayer()
   const [filterText, setFilterText] = useState('')
@@ -91,6 +144,11 @@ function AlbumView() {
     return selectedAlbum.tracks.reduce((acc, t) => acc + (t.duration || 0), 0)
   }, [selectedAlbum])
 
+  const handleSelectTrack = useCallback((track, idx) => {
+    if (!selectedAlbum) return
+    playTrack(track, selectedAlbum, displayTracks, idx)
+  }, [playTrack, selectedAlbum, displayTracks])
+
   if (isLoading) {
     return (
       <div className="loading-view">
@@ -121,12 +179,12 @@ function AlbumView() {
       {/* Cabecera del Álbum */}
       <div className="album-header">
         <div className="album-cover-wrapper">
+          <div className="album-cover-glow" style={{ backgroundImage: album.cover ? `url("${album.cover}")` : undefined }} />
           {album.cover ? (
-            <img src={album.cover} alt={album.name} className="album-cover-large" />
+            <img src={album.cover} alt={album.name} className="album-cover-large" decoding="async" />
           ) : (
             <div className="album-cover-large-placeholder">💿</div>
           )}
-          <div className="album-cover-glow" style={{ backgroundImage: album.cover ? `url("${album.cover}")` : undefined }} />
         </div>
 
         <div className="album-info">
@@ -244,49 +302,14 @@ function AlbumView() {
           const isThisTrackActive = currentTrack?.id === track.id
 
           return (
-            <li
+            <TrackRow
               key={track.id}
-              className={`track-item ${isThisTrackActive ? 'active' : ''}`}
-              onClick={() => playTrack(track, album, displayTracks, idx)}
-            >
-              {/* Número o Indicador de Ecualizador Animado */}
-              <div className="track-number">
-                {isThisTrackActive ? (
-                  <AnimatedEqualizer isPaused={!isPlaying} />
-                ) : (
-                  <span className="track-index-num">{idx + 1}</span>
-                )}
-              </div>
-
-              {/* Miniatura de la Imagen de la Canción con Hover Play */}
-              <div className="track-cover-container">
-                {track.cover ? (
-                  <img
-                    src={track.cover}
-                    alt=""
-                    className="track-thumb-img"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                ) : (
-                  <div className="track-thumb-fallback">🎵</div>
-                )}
-                <div className="track-thumb-hover-overlay">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                </div>
-              </div>
-
-              {/* Título y Artista */}
-              <div className="track-info">
-                <div className="track-title" title={track.title}>{track.title}</div>
-                <div className="track-artist" title={track.artist}>{track.artist}</div>
-              </div>
-
-              {/* Duración */}
-              <span className="track-duration">{formatTime(track.duration)}</span>
-            </li>
+              track={track}
+              index={idx}
+              isActive={isThisTrackActive}
+              isPlaying={isThisTrackActive ? isPlaying : false}
+              onSelectTrack={handleSelectTrack}
+            />
           )
         })}
 

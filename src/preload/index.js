@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setSidePanelMode: (mode) => ipcRenderer.send('set-side-panel-mode', mode),
   updatePanelSettings: (settings) => ipcRenderer.send('update-panel-settings', settings),
   getPanelSettings: () => ipcRenderer.invoke('get-panel-settings'),
+  onPanelSettingsUpdated: (callback) => {
+    const handler = (_, settings) => callback(settings)
+    ipcRenderer.on('panel-settings-updated', handler)
+    return () => ipcRenderer.removeListener('panel-settings-updated', handler)
+  },
 
   onSidePanelMode: (callback) => {
     const handler = (_, mode) => callback(mode)

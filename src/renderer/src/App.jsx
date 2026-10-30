@@ -10,10 +10,11 @@ import ToastNotification from './components/ToastNotification'
 function MainPlayerApp({ theme, onThemeChange }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(false)
+  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
   const [isSpotlightOpen, setIsSpotlightOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const settingsMenuRef = useRef(null)
-  const { currentTrack, togglePlay, volume, setVolumeLevel, musicDirectory, updateMusicDirectory } = usePlayer()
+  const { currentTrack, selectedAlbum, togglePlay, volume, setVolumeLevel, musicDirectory, updateMusicDirectory } = usePlayer()
 
   useEffect(() => {
     if (!isSettingsOpen) return undefined
@@ -35,10 +36,19 @@ function MainPlayerApp({ theme, onThemeChange }) {
     }
   }, [isSettingsOpen])
 
-  // Sincronizar estado inicial de Always on Top
+  // Sincronizar estado inicial de Always on Top y visibilidad del Panel Lateral
   useEffect(() => {
     if (window.electronAPI.getMainAlwaysOnTop) {
       window.electronAPI.getMainAlwaysOnTop().then(setIsAlwaysOnTop).catch(console.error)
+    }
+    let unsubPanelMode = null
+    if (window.electronAPI.onSidePanelMode) {
+      unsubPanelMode = window.electronAPI.onSidePanelMode((mode) => {
+        setIsSidePanelOpen(mode === 'expanded')
+      })
+    }
+    return () => {
+      if (unsubPanelMode) unsubPanelMode()
     }
   }, [])
 
@@ -92,14 +102,14 @@ function MainPlayerApp({ theme, onThemeChange }) {
 
   return (
     <div className="app">
-      {/* Barra de título personalizada */}
-      <div className="titlebar">
+      {/* Barra de título personalizada con jerarquía visual equilibrada */}
+      <header className="titlebar">
         <div className="titlebar-drag">
           <span className="titlebar-title">🎵 Reproductor de Música</span>
         </div>
 
-        <div className="titlebar-actions">
-          {/* Botón Buscador Global Spotlight */}
+        {/* Centro: Buscador Global Spotlight */}
+        <div className="titlebar-center">
           <button
             className="titlebar-spotlight-btn"
             onClick={() => setIsSpotlightOpen(true)}
@@ -111,104 +121,113 @@ function MainPlayerApp({ theme, onThemeChange }) {
             <span>Buscar música...</span>
             <kbd className="titlebar-kbd">Ctrl+K</kbd>
           </button>
+        </div>
 
-          {/* Botón para Fijar ventana principal en primer plano */}
-          <button
-            className={`titlebar-pin-btn ${isAlwaysOnTop ? 'active-pin' : ''}`}
-            onClick={handleToggleAlwaysOnTop}
-            title={isAlwaysOnTop ? 'Ventana siempre visible: ACTIVADA (Prioridad sobre otras apps)' : 'Fijar ventana siempre encima'}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
-            </svg>
-            <span>{isAlwaysOnTop ? 'Fijada' : 'Fijar'}</span>
-          </button>
-
-          {/* Botón para desplegar/ocultar el Panel Lateral Rápido */}
-          <button
-            className="titlebar-side-btn"
-            onClick={() => window.electronAPI.toggleSidePanel()}
-            title="Panel lateral de navegación rápida (Ctrl+Shift+M / Ctrl+Alt+M)"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M4 18h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2zm12-10h4v8h-4V8z"/>
-            </svg>
-            <span>Panel Rápido</span>
-          </button>
-
-          <div className="settings-menu" ref={settingsMenuRef}>
+        <div className="titlebar-right">
+          <div className="titlebar-actions">
+            {/* Botón para desplegar/ocultar el Panel Lateral Rápido (sincronizado en tiempo real) */}
             <button
-              className={`titlebar-settings-btn ${isSettingsOpen ? 'active' : ''}`}
-              onClick={() => setIsSettingsOpen((open) => !open)}
-              title="Ajustes"
-              aria-label="Ajustes"
-              aria-expanded={isSettingsOpen}
+              className={`titlebar-side-btn ${isSidePanelOpen ? 'active-panel' : ''}`}
+              onClick={() => window.electronAPI.toggleSidePanel()}
+              title="Panel lateral de navegación rápida (Ctrl+Shift+M / Ctrl+Alt+M)"
+              aria-pressed={isSidePanelOpen}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
-                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.94-.08-.02a1.7 1.7 0 0 0-1.77.49l-.06.06h-3.4l-.03-.08a1.7 1.7 0 0 0-1.43-1.14h-.08l-1.7-2.94.05-.06a1.7 1.7 0 0 0 .1-1.8l-.04-.07 1.7-2.94h.08a1.7 1.7 0 0 0 1.48-.98l.04-.08h3.4l.04.08a1.7 1.7 0 0 0 1.48.98h.08l1.7 2.94-.05.07A1.7 1.7 0 0 0 19.4 15Z" />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M4 18h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2zm12-10h4v8h-4V8z"/>
               </svg>
+              <span>Panel Rápido</span>
             </button>
 
-            {isSettingsOpen && (
-              <div className="settings-popover" role="dialog" aria-label="Ajustes de la aplicación">
-                <div className="settings-popover-title">Ajustes</div>
-                <button
-                  className="settings-option"
-                  onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')}
-                  aria-pressed={theme === 'light'}
-                >
-                  <span className="settings-option-icon" aria-hidden="true">
-                    {theme === 'dark' ? '☀' : '☾'}
-                  </span>
-                  <span className="settings-option-label">
-                    <span>Tema</span>
-                    <span className="settings-option-description">{theme === 'dark' ? 'Oscuro' : 'Claro'}</span>
-                  </span>
-                  <span className={`settings-switch ${theme === 'light' ? 'enabled' : ''}`} aria-hidden="true">
-                    <span />
-                  </span>
-                </button>
-                <div className="settings-directory">
-                  <span className="settings-directory-label">Carpeta de música</span>
-                  <span className="settings-directory-value" title={musicDirectory || 'Ubicación automática'}>
-                    {musicDirectory || 'Ubicación automática'}
-                  </span>
-                  <button className="settings-browse-btn" onClick={handleBrowseMusicDirectory}>
-                    Examinar directorio
+            {/* Botón para Fijar ventana principal en primer plano */}
+            <button
+              className={`titlebar-pin-btn ${isAlwaysOnTop ? 'active-pin' : ''}`}
+              onClick={handleToggleAlwaysOnTop}
+              title={isAlwaysOnTop ? 'Ventana siempre visible: ACTIVADA (Prioridad sobre otras apps)' : 'Fijar ventana siempre encima'}
+              aria-pressed={isAlwaysOnTop}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+              </svg>
+              <span>{isAlwaysOnTop ? 'Fijada' : 'Fijar'}</span>
+            </button>
+
+            <div className="settings-menu" ref={settingsMenuRef}>
+              <button
+                className={`titlebar-settings-btn ${isSettingsOpen ? 'active' : ''}`}
+                onClick={() => setIsSettingsOpen((open) => !open)}
+                title="Ajustes"
+                aria-label="Ajustes"
+                aria-expanded={isSettingsOpen}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.94-.08-.02a1.7 1.7 0 0 0-1.77.49l-.06.06h-3.4l-.03-.08a1.7 1.7 0 0 0-1.43-1.14h-.08l-1.7-2.94.05-.06a1.7 1.7 0 0 0 .1-1.8l-.04-.07 1.7-2.94h.08a1.7 1.7 0 0 0 1.48-.98l.04-.08h3.4l.04.08a1.7 1.7 0 0 0 1.48.98h.08l1.7 2.94-.05.07A1.7 1.7 0 0 0 19.4 15Z" />
+                </svg>
+              </button>
+
+              {isSettingsOpen && (
+                <div className="settings-popover" role="dialog" aria-label="Ajustes de la aplicación">
+                  <div className="settings-popover-title">Ajustes</div>
+                  <button
+                    className="settings-option"
+                    onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')}
+                    aria-pressed={theme === 'light'}
+                  >
+                    <span className="settings-option-icon" aria-hidden="true">
+                      {theme === 'dark' ? '☀' : '☾'}
+                    </span>
+                    <span className="settings-option-label">
+                      <span>Tema</span>
+                      <span className="settings-option-description">{theme === 'dark' ? 'Oscuro' : 'Claro'}</span>
+                    </span>
+                    <span className={`settings-switch ${theme === 'light' ? 'enabled' : ''}`} aria-hidden="true">
+                      <span />
+                    </span>
                   </button>
+                  <div className="settings-directory">
+                    <span className="settings-directory-label">Carpeta de música</span>
+                    <span className="settings-directory-value" title={musicDirectory || 'Ubicación automática'}>
+                      {musicDirectory || 'Ubicación automática'}
+                    </span>
+                    <button className="settings-browse-btn" onClick={handleBrowseMusicDirectory}>
+                      Examinar directorio
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+          </div>
+
+          <div className="titlebar-divider" aria-hidden="true" />
+
+          <div className="titlebar-controls">
+            <button className="titlebar-btn" onClick={() => window.electronAPI.minimizeWindow()} title="Minimizar (Despliega Panel Lateral)">
+              <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="2" fill="currentColor"/></svg>
+            </button>
+            <button className="titlebar-btn" onClick={() => window.electronAPI.maximizeWindow()} title="Maximizar">
+              <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>
+            </button>
+            <button className="titlebar-btn close-btn" onClick={() => window.electronAPI.closeWindow()} title="Cerrar">
+              <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1L11 11M11 1L1 11" stroke="currentColor" strokeWidth="1.5"/></svg>
+            </button>
           </div>
         </div>
+      </header>
 
-        <div className="titlebar-controls">
-          <button className="titlebar-btn" onClick={() => window.electronAPI.minimizeWindow()} title="Minimizar (Activa Panel Lateral)">
-            <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="2" fill="currentColor"/></svg>
-          </button>
-          <button className="titlebar-btn" onClick={() => window.electronAPI.maximizeWindow()} title="Maximizar">
-            <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>
-          </button>
-          <button className="titlebar-btn close-btn" onClick={() => window.electronAPI.closeWindow()} title="Cerrar">
-            <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1L11 11M11 1L1 11" stroke="currentColor" strokeWidth="1.5"/></svg>
-          </button>
-        </div>
-      </div>
-
-      {/* Contenido principal con Fondo Ambiental Dinámico */}
+      {/* Contenido principal con Fondo Ambiental Dinámico fijo (no repinta al hacer scroll) */}
       <div className="app-content">
         <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen(prev => !prev)} />
-        <main className="main-view">
-          {/* Resplandor ambiental reactivo suave */}
+        <div className="main-stage">
           <div
             className="ambient-backdrop-glow"
             style={{
-              opacity: currentTrack?.cover ? 0.85 : 0.4
+              opacity: (currentTrack?.cover || selectedAlbum?.cover) ? 0.85 : 0.4
             }}
           />
-          <AlbumView />
-        </main>
+          <main className="main-view">
+            <AlbumView />
+          </main>
+        </div>
       </div>
 
       {/* Barra del reproductor */}

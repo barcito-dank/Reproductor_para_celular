@@ -37,7 +37,7 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const ctx = canvas.getContext('2d')
+    const ctx = canvas.getContext('2d', { alpha: true })
     if (!ctx) return
 
     peaksRef.current = new Array(barCount).fill(4)
@@ -176,6 +176,14 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
 
         const x = i * (barWidth + gap)
         const y = drawHeight - smoothH
+
+        // Halo suave directo en canvas (mucho más ligero que CSS filter: drop-shadow por frame)
+        if (smoothH > 8) {
+          ctx.globalAlpha = 0.22
+          ctx.fillStyle = gradient
+          ctx.fillRect(x - 1, Math.max(0, y - 1), barWidth + 2, smoothH + 1)
+          ctx.globalAlpha = 1
+        }
 
         ctx.fillStyle = gradient
         const radius = Math.min(barWidth / 2, 4)
