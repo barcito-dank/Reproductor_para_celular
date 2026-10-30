@@ -1,0 +1,29 @@
+# Dependencias
+node_modules/
+
+# Compilacion y empaquetado Electron / Vite
+out/
+dist/
+Aplicacion_Compilada/Instalador/
+Aplicacion_Compilada/Version_Portable/
+Aplicacion_Compilada/**/*.exe
+Aplicacion_Compilada/**/*.lnk
+*.exe
+*.dll
+
+# Carpetas de desarrollo y archivado
+_archivado/
+
+# Logs y temporales
+*.log
+logs/
+*.tmp
+*.bak
+
+# Entornos y editores
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

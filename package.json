@@ -1,0 +1,69 @@
+{
+  "name": "reproductor-de-musica",
+  "version": "1.0.0",
+  "description": "Reproductor de música personal con interfaz moderna y oscura",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite dev",
+    "build:unpack": "electron-vite build && electron-builder --dir",
+    "build:exe": "electron-vite build && electron-builder --win",
+    "dist": "electron-vite build && electron-builder --win && powershell -ExecutionPolicy Bypass -File scripts/update_compiled_app.ps1",
+    "release:update": "powershell -ExecutionPolicy Bypass -File scripts/update_compiled_app.ps1",
+    "shortcut:desktop": "powershell -ExecutionPolicy Bypass -File scripts/create_shortcut.ps1",
+    "icons:generate": "powershell -ExecutionPolicy Bypass -File scripts/generate_icon.ps1"
+  },
+  "build": {
+    "appId": "com.reproductor.musica",
+    "productName": "Reproductor de Música",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "node_modules/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Reproductor de Música"
+    }
+  },
+  "dependencies": {
+    "music-metadata": "^10.6.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "^28.1.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^2.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vite": "^5.0.12"
+  }
+}

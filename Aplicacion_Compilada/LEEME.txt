@@ -1,0 +1,31 @@
+﻿========================================================================
+                      REPRODUCTOR DE MUSICA
+                 Archivos de la Aplicacion Compilada
+========================================================================
+
+Esta carpeta contiene la aplicacion lista para ser utilizada por el usuario final,
+completamente independiente del entorno de desarrollo.
+
+CONTENIDO:
+------------------------------------------------------------------------
+1. "Iniciar Reproductor.lnk"
+   - Acceso directo rapido para ejecutar la aplicacion inmediatamente
+     sin necesidad de instalar nada.
+
+2. Carpeta "Instalador/"
+   - "Instalador_Reproductor_de_Musica.exe"
+   - Instalador estandar para Windows (.exe con NSIS).
+   - Crea accesos directos en el Escritorio y en el Menu Inicio.
+
+3. Carpeta "Version_Portable/"
+   - "Reproductor_de_Musica_Portable.exe"
+   - Version standalone que no requiere instalacion. Ideal para llevar
+     en un pendrive o ejecutar en cualquier PC con Windows.
+
+DONDE GUARDAR TU MUSICA:
+------------------------------------------------------------------------
+Por defecto, el reproductor buscara tus canciones en:
+C:\Users\barre\Music\canciones_organizadas
+o en la carpeta "canciones_organizadas" de este proyecto.
+Puedes cambiar esta carpeta en cualquier momento desde el menu de Ajustes
+en la barra superior del reproductor.
