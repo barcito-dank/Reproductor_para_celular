@@ -34,7 +34,7 @@ function getAllAlbums(nodes) {
 
 export function PlayerProvider({ children, isMiniPanel = false }) {
   const audioRef = useRef(new Audio())
-  const [library, setLibrary] = useState([]) // Árbol jerárquico de carpetas y álbumes
+  const [rawLibrary, setRawLibrary] = useState([]) // Árbol jerárquico original de carpetas y álbumes
   const [currentTrack, setCurrentTrack] = useState(null)
   const [currentAlbum, setCurrentAlbum] = useState(null)
   const [playlist, setPlaylist] = useState([]) // Cola de reproducción
@@ -51,8 +51,52 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     window.localStorage.getItem('musicPlayerDirectory') || ''
   ))
 
-  // allAlbums memoizado estrictamente basado en library (se calcula una sola vez tras escanear)
-  const allAlbums = useMemo(() => getAllAlbums(library), [library])
+  // allAlbums memoizado estrictamente basado en rawLibrary (se calcula una sola vez tras escanear)
+  const allAlbums = useMemo(() => getAllAlbums(rawLibrary), [rawLibrary])
+
+  // Álbum virtual "Todas" con todas las canciones de todos los álbumes
+  const allTracksAlbum = useMemo(() => {
+    if (!allAlbums || allAlbums.length === 0) return null
+    const tracks = []
+    const seenIds = new Set()
+    let firstCover = null
+
+    for (const album of allAlbums) {
+      if (!album.tracks) continue
+      for (const track of album.tracks) {
+        if (!seenIds.has(track.id)) {
+          seenIds.add(track.id)
+          const cover = track.cover || album.cover || null
+          if (!firstCover && cover) firstCover = cover
+          tracks.push({
+            ...track,
+            cover,
+            albumName: album.name
+          })
+        }
+      }
+    }
+
+    if (tracks.length === 0) return null
+
+    return {
+      id: '__all_tracks__',
+      type: 'album',
+      isAllTracks: true,
+      name: 'Todas',
+      path: '',
+      categoryPath: 'Biblioteca Completa',
+      cover: firstCover,
+      trackCount: tracks.length,
+      tracks
+    }
+  }, [allAlbums])
+
+  // Biblioteca final incluyendo el álbum "Todas" al principio
+  const library = useMemo(() => {
+    if (!allTracksAlbum) return rawLibrary
+    return [allTracksAlbum, ...rawLibrary]
+  }, [allTracksAlbum, rawLibrary])
 
   const lastTimeSyncRef = useRef(0)
   const lastSentPlaylistRef = useRef(null)
@@ -62,16 +106,24 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     setIsLoading(true)
     try {
       const tree = await window.electronAPI.scanMusic(directory)
-      setLibrary(tree || [])
-      // Seleccionar automáticamente el primer álbum sin recargar la biblioteca
-      if (tree && tree.length > 0) {
-        setSelectedAlbum(prev => prev || findFirstAlbum(tree))
-      }
+      setRawLibrary(tree || [])
     } catch (err) {
       console.error('Error cargando biblioteca:', err)
     }
     setIsLoading(false)
   }, []) // Dependencias vacías: NUNCA se vuelve a ejecutar al seleccionar un álbum
+
+  // Seleccionar automáticamente el álbum "Todas" (o el primero disponible) al cargar la biblioteca
+  useEffect(() => {
+    if (isMiniPanel) return
+    if (library.length > 0) {
+      setSelectedAlbum(prev => {
+        if (!prev) return allTracksAlbum || findFirstAlbum(library)
+        if (prev.id === '__all_tracks__' && allTracksAlbum) return allTracksAlbum
+        return prev
+      })
+    }
+  }, [isMiniPanel, library, allTracksAlbum])
 
   const updateMusicDirectory = useCallback(async (directory) => {
     window.localStorage.setItem('musicPlayerDirectory', directory)
@@ -82,6 +134,10 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
   const historyRef = useRef([])
   const futureRef = useRef([])
+  // Cola barajada (Fisher-Yates) y conjunto de pistas ya reproducidas en el ciclo actual
+  const shuffleQueueRef = useRef([])
+  const playedInCycleRef = useRef(new Set())
+  const shufflePlaylistRef = useRef(null)
 
   // Web Audio API para análisis de espectro en tiempo real
   const audioContextRef = useRef(null)
@@ -126,12 +182,53 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [isMiniPanel])
 
+  // Barajado uniforme Fisher-Yates de índices candidatos
+  const buildShuffledIndices = useCallback((list, excludeIds = new Set(), avoidRecentIds = new Set()) => {
+    const indices = []
+    for (let i = 0; i < list.length; i++) {
+      const id = list[i]?.id ?? i
+      if (!excludeIds.has(id)) {
+        indices.push(i)
+      }
+    }
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      const tmp = indices[i]
+      indices[i] = indices[j]
+      indices[j] = tmp
+    }
+    // Como extraemos con .pop(), el próximo en sonar es el último elemento del array.
+    // Evitar que las canciones recién escuchadas al final del ciclo anterior salgan primeras en el nuevo ciclo.
+    if (avoidRecentIds.size > 0 && indices.length > avoidRecentIds.size) {
+      const fresh = []
+      const recent = []
+      for (const idx of indices) {
+        const id = list[idx]?.id ?? idx
+        if (avoidRecentIds.has(id)) {
+          recent.push(idx)
+        } else {
+          fresh.push(idx)
+        }
+      }
+      // recent al principio del array (saldrán al final del ciclo), fresh al final (saldrán primero con .pop())
+      return [...recent, ...fresh]
+    }
+    return indices
+  }, [])
+
   // Carga un archivo de audio en el elemento Audio y actualiza estados de reproducción
   const loadAndPlayTrack = useCallback((track, album = null, index = -1) => {
     const audio = audioRef.current
 
     // Inicializar o reanudar Web Audio Analyser
     initAudioAnalyser()
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume().catch(() => {})
+    }
+
+    if (track?.id != null) {
+      playedInCycleRef.current.add(track.id)
+    }
 
     setCurrentTrack(track)
     if (album) setCurrentAlbum(album)
@@ -152,13 +249,32 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.src = encodeURI(fileUrl).replace(/#/g, '%23')
     }
 
-    audio.play().catch(err => console.error('Error reproduciendo audio:', err))
+    const playPromise = audio.play()
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setIsPlaying(!audio.paused)
+          if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+            audioContextRef.current.resume().catch(() => {})
+          }
+        })
+        .catch((err) => {
+          if (err?.name !== 'AbortError') {
+            console.error('Error reproduciendo audio:', err)
+          }
+        })
+    }
   }, [initAudioAnalyser])
 
   // Reproducir pista específica (selección manual)
   const playTrack = useCallback((track, album = null, newPlaylist = null, index = 0) => {
     if (newPlaylist) {
       setPlaylist(newPlaylist)
+      if (shufflePlaylistRef.current !== newPlaylist) {
+        shufflePlaylistRef.current = newPlaylist
+        playedInCycleRef.current = new Set(track?.id != null ? [track.id] : [])
+        shuffleQueueRef.current = buildShuffledIndices(newPlaylist, playedInCycleRef.current)
+      }
     }
 
     // Guardar la canción que estaba sonando en el historial
@@ -173,7 +289,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
 
     loadAndPlayTrack(track, album, index)
-  }, [currentTrack, currentAlbum, playlistIndex, loadAndPlayTrack])
+  }, [currentTrack, currentAlbum, playlistIndex, loadAndPlayTrack, buildShuffledIndices])
 
   // Alternar reproducir/pausar
   const togglePlay = useCallback(() => {
@@ -181,9 +297,18 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (!currentTrack) return
     initAudioAnalyser()
     if (audio.paused) {
-      audio.play().catch(console.error)
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {})
+      }
+      const p = audio.play()
+      if (p !== undefined) {
+        p.then(() => setIsPlaying(!audio.paused)).catch((err) => {
+          if (err?.name !== 'AbortError') console.error(err)
+        })
+      }
     } else {
       audio.pause()
+      setIsPlaying(false)
     }
   }, [currentTrack, initAudioAnalyser])
 
@@ -206,10 +331,19 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [])
 
-  // Alternar modo aleatorio
+  // Alternar modo aleatorio (reinicia la bolsa barajada con las canciones aún no reproducidas)
   const toggleShuffle = useCallback(() => {
-    setShuffle(prev => !prev)
-  }, [])
+    setShuffle(prev => {
+      const next = !prev
+      if (next && playlist.length > 0) {
+        const currentId = currentTrack?.id ?? playlist[playlistIndex]?.id
+        playedInCycleRef.current = new Set(currentId != null ? [currentId] : [])
+        shufflePlaylistRef.current = playlist
+        shuffleQueueRef.current = buildShuffledIndices(playlist, playedInCycleRef.current)
+      }
+      return next
+    })
+  }, [playlist, currentTrack, playlistIndex, buildShuffledIndices])
 
   // Alternar bucle (none -> all -> one -> none)
   const toggleLoop = useCallback(() => {
@@ -241,10 +375,46 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
     let nextIndex = -1
     if (shuffle) {
-      nextIndex = Math.floor(Math.random() * playlist.length)
-      if (playlist.length > 1) {
-        while (nextIndex === playlistIndex) {
-          nextIndex = Math.floor(Math.random() * playlist.length)
+      if (playlist.length === 1) {
+        nextIndex = 0
+      } else {
+        const currentId = currentTrack?.id ?? playlist[playlistIndex]?.id
+        if (currentId != null) {
+          playedInCycleRef.current.add(currentId)
+        }
+
+        // Si cambió la referencia de playlist, reconstruir la cola barajada
+        if (shufflePlaylistRef.current !== playlist) {
+          shufflePlaylistRef.current = playlist
+          shuffleQueueRef.current = buildShuffledIndices(playlist, playedInCycleRef.current)
+        }
+
+        // Extraer el siguiente índice válido que no haya sido reproducido aún en este ciclo
+        while (shuffleQueueRef.current.length > 0) {
+          const candidate = shuffleQueueRef.current.pop()
+          const candidateTrack = playlist[candidate]
+          const candidateId = candidateTrack?.id ?? candidate
+          if (
+            candidateTrack &&
+            candidate !== playlistIndex &&
+            !playedInCycleRef.current.has(candidateId)
+          ) {
+            nextIndex = candidate
+            break
+          }
+        }
+
+        // Si ya sonaron todas las canciones de la lista en este ciclo, iniciar un nuevo ciclo completo sin repetir las recientes
+        if (nextIndex === -1) {
+          playedInCycleRef.current = new Set(currentId != null ? [currentId] : [])
+          const recentLimit = Math.min(Math.floor(playlist.length / 2), 5)
+          const avoidRecentIds = new Set()
+          for (let i = historyRef.current.length - 1; i >= 0 && avoidRecentIds.size < recentLimit; i--) {
+            const hId = historyRef.current[i]?.track?.id
+            if (hId != null) avoidRecentIds.add(hId)
+          }
+          shuffleQueueRef.current = buildShuffledIndices(playlist, playedInCycleRef.current, avoidRecentIds)
+          nextIndex = shuffleQueueRef.current.length > 0 ? shuffleQueueRef.current.pop() : 0
         }
       }
     } else {
@@ -269,7 +439,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
 
     loadAndPlayTrack(playlist[nextIndex], currentAlbum, nextIndex)
-  }, [playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack])
+  }, [playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack, buildShuffledIndices])
 
   // Canción anterior: regresa fielmente por todas las canciones escuchadas previamente
   const previousTrack = useCallback(() => {
@@ -323,14 +493,20 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   }, [loop, nextTrack])
 
   // Reproducir álbum completo
-  const playAlbum = useCallback((album, startIndex = 0) => {
+  const playAlbum = useCallback((album, startIndex) => {
     if (!album || !album.tracks || album.tracks.length === 0) return
     const tracks = [...album.tracks]
+    const initialIdx =
+      typeof startIndex === 'number'
+        ? startIndex
+        : shuffle
+          ? Math.floor(Math.random() * tracks.length)
+          : 0
     setPlaylist(tracks)
-    setPlaylistIndex(startIndex)
+    setPlaylistIndex(initialIdx)
     setCurrentAlbum(album)
-    playTrack(tracks[startIndex], album, tracks, startIndex)
-  }, [playTrack])
+    playTrack(tracks[initialIdx], album, tracks, initialIdx)
+  }, [playTrack, shuffle])
 
   // Cargar biblioteca al montar en la ventana principal
   useEffect(() => {
@@ -357,14 +533,30 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     const onDurationChange = () => { if (audio.duration) setDuration(audio.duration) }
     const onLoadedMetadata = () => { if (audio.duration) setDuration(audio.duration) }
     const onEnded = () => handleTrackEnd()
-    const onPlay = () => setIsPlaying(true)
-    const onPause = () => setIsPlaying(false)
+    const onPlay = () => {
+      setIsPlaying(true)
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {})
+      }
+    }
+    const onPlaying = () => {
+      setIsPlaying(true)
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {})
+      }
+    }
+    const onPause = () => {
+      if (audio.paused) {
+        setIsPlaying(false)
+      }
+    }
 
     audio.addEventListener('timeupdate', onTimeUpdate)
     audio.addEventListener('durationchange', onDurationChange)
     audio.addEventListener('loadedmetadata', onLoadedMetadata)
     audio.addEventListener('ended', onEnded)
     audio.addEventListener('play', onPlay)
+    audio.addEventListener('playing', onPlaying)
     audio.addEventListener('pause', onPause)
 
     return () => {
@@ -373,6 +565,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.removeEventListener('loadedmetadata', onLoadedMetadata)
       audio.removeEventListener('ended', onEnded)
       audio.removeEventListener('play', onPlay)
+      audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPause)
     }
   }, [handleTrackEnd, volume])
@@ -537,6 +730,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     playAlbum,
     loadLibrary,
     analyserRef,
+    audioContextRef,
     initAudioAnalyser
   }), [
     library,

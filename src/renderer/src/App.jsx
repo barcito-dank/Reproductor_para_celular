@@ -233,8 +233,36 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    window.localStorage.setItem('musicPlayerTheme', theme)
-  }, [theme])
+    if (!isMini && !isNotification) {
+      window.localStorage.setItem('musicPlayerTheme', theme)
+      window.electronAPI?.sendPlayerCommand?.(`theme-${theme}`)
+    }
+  }, [theme, isMini, isNotification])
+
+  // Sincronizar cambios de tema en tiempo real hacia la barra lateral (MiniPanel) y notificaciones
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === 'musicPlayerTheme' && e.newValue) {
+        setTheme(e.newValue === 'light' ? 'light' : 'dark')
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+
+    let unsubCmd = null
+    if (window.electronAPI?.onPlayerCommand) {
+      unsubCmd = window.electronAPI.onPlayerCommand((cmd) => {
+        if (typeof cmd === 'string' && cmd.startsWith('theme-')) {
+          const nextTheme = cmd.replace('theme-', '') === 'light' ? 'light' : 'dark'
+          setTheme(nextTheme)
+        }
+      })
+    }
+
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      if (unsubCmd) unsubCmd()
+    }
+  }, [])
 
   useEffect(() => {
     if (isMini || isNotification) {
