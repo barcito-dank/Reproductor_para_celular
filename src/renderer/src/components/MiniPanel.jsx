@@ -288,7 +288,10 @@ function MiniPanel() {
 
     if (window.electronAPI.onPanelSettingsUpdated) {
       unsubSettings = window.electronAPI.onPanelSettingsUpdated((nextSettings) => {
-        if (nextSettings) setSettings(nextSettings)
+        if (nextSettings) {
+          const pinned = Boolean(nextSettings.pinned)
+          setSettings({ pinned, autoHide: !pinned })
+        }
       })
     }
 
@@ -302,7 +305,10 @@ function MiniPanel() {
   useEffect(() => {
     if (window.electronAPI.getPanelSettings) {
       window.electronAPI.getPanelSettings().then((s) => {
-        if (s) setSettings(s)
+        if (s) {
+          const pinned = Boolean(s.pinned)
+          setSettings({ pinned, autoHide: !pinned })
+        }
       }).catch(console.error)
     }
   }, [])
@@ -310,7 +316,8 @@ function MiniPanel() {
   const handleTogglePinned = useCallback((e) => {
     e?.stopPropagation()
     setSettings((prev) => {
-      const updated = { ...prev, pinned: !prev.pinned }
+      const nextPinned = !prev.pinned
+      const updated = { pinned: nextPinned, autoHide: !nextPinned }
       window.electronAPI.updatePanelSettings(updated)
       return updated
     })
@@ -319,7 +326,8 @@ function MiniPanel() {
   const handleToggleAutoHide = useCallback((e) => {
     e?.stopPropagation()
     setSettings((prev) => {
-      const updated = { ...prev, autoHide: !prev.autoHide }
+      const nextAutoHide = !prev.autoHide
+      const updated = { pinned: !nextAutoHide, autoHide: nextAutoHide }
       window.electronAPI.updatePanelSettings(updated)
       return updated
     })
@@ -398,7 +406,12 @@ function MiniPanel() {
             <button
               className={`mini-action-btn ${settings.pinned ? 'active-pin' : ''}`}
               onClick={handleTogglePinned}
-              title={settings.pinned ? 'Siempre visible: ACTIVADO (no se oculta)' : 'Mantener siempre visible (Fijar)'}
+              aria-pressed={settings.pinned}
+              title={
+                settings.pinned
+                  ? 'Ventana fija: ACTIVADA (ocultamiento automático desactivado)'
+                  : 'Activar modo ventana fija (desactiva ocultamiento automático)'
+              }
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
@@ -406,9 +419,14 @@ function MiniPanel() {
             </button>
 
             <button
-              className={`mini-action-btn ${settings.autoHide && !settings.pinned ? 'active-autohide' : ''}`}
+              className={`mini-action-btn ${settings.autoHide ? 'active-autohide' : ''}`}
               onClick={handleToggleAutoHide}
-              title={settings.autoHide ? 'Ocultación automática: ACTIVADA (se oculta al hacer clic fuera)' : 'Ocultación automática: DESACTIVADA'}
+              aria-pressed={settings.autoHide}
+              title={
+                settings.autoHide
+                  ? 'Ocultamiento automático: ACTIVADO (ventana fija desactivada)'
+                  : 'Activar ocultamiento automático (desactiva ventana fija)'
+              }
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm4.2 14.2L11 13V7h1.5v5.2l4.5 2.7-.8 1.3z" />
@@ -506,24 +524,36 @@ function MiniPanel() {
           </button>
         </div>
 
-        {/* Píldoras interactivas de estado y volumen */}
+        {/* Píldoras interactivas de modos alternativos (Fija vs Auto-ocultar) y volumen */}
         <div className="mini-settings-badges">
-          <button
-            type="button"
-            className={`badge-pill interactive-pill ${settings.pinned ? 'on' : ''}`}
-            onClick={handleTogglePinned}
-            title="Alternar fijar siempre visible"
-          >
-            {settings.pinned ? '📌 Fijada' : '📌 Sin fijar'}
-          </button>
-          <button
-            type="button"
-            className={`badge-pill interactive-pill ${settings.autoHide && !settings.pinned ? 'on' : ''}`}
-            onClick={handleToggleAutoHide}
-            title="Alternar ocultación automática al tocar fuera"
-          >
-            {settings.autoHide ? '⚡ Auto ON' : '⚡ Auto OFF'}
-          </button>
+          <div className="mini-mode-switch" role="group" aria-label="Modo del panel lateral">
+            <button
+              type="button"
+              className={`badge-pill interactive-pill pin-mode-pill ${settings.pinned ? 'on' : ''}`}
+              onClick={handleTogglePinned}
+              aria-pressed={settings.pinned}
+              title={
+                settings.pinned
+                  ? 'Modo ventana fija activo · Clic para cambiar a ocultamiento automático'
+                  : 'Cambiar a modo ventana fija (desactiva ocultamiento automático)'
+              }
+            >
+              {settings.pinned ? '📌 Fijada' : '📌 Sin fijar'}
+            </button>
+            <button
+              type="button"
+              className={`badge-pill interactive-pill autohide-mode-pill ${settings.autoHide ? 'on' : ''}`}
+              onClick={handleToggleAutoHide}
+              aria-pressed={settings.autoHide}
+              title={
+                settings.autoHide
+                  ? 'Modo ocultamiento automático activo · Clic para fijar ventana'
+                  : 'Cambiar a ocultamiento automático (desactiva ventana fija)'
+              }
+            >
+              {settings.autoHide ? '⚡ Auto ON' : '⚡ Auto OFF'}
+            </button>
+          </div>
 
           <div
             className="badge-pill volume-pill"

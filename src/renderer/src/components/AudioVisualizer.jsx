@@ -20,9 +20,21 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
   const widthRef = useRef(0)            // Ancho CSS cacheado del canvas
   const dataArrayRef = useRef(null)     // Uint8Array reutilizado
   const bufferLengthRef = useRef(0)
+  const isWindowVisibleRef = useRef(!document.hidden)
 
   // Mantener siempre sincronizada la referencia en vivo de isPlaying (evita closures obsoletos)
   isPlayingRef.current = isPlaying
+
+  const hasResidualDecay = () => {
+    const heights = currentHeightsRef.current
+    const peaks = peaksRef.current
+    for (let i = 0; i < heights.length; i++) {
+      if (heights[i] > 4.05 || (peaks[i] ?? 4) > 4.05) {
+        return true
+      }
+    }
+    return false
+  }
 
   useEffect(() => {
     initAudioAnalyser()
@@ -117,8 +129,11 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
       if (!gradientRef.current) rebuildGradient()
       const gradient = gradientRef.current
       const peakColor = peakColorRef.current
+      const radius = Math.min(barWidth / 2, 4)
 
       let hasMotion = playingNow
+      let hasHalos = false
+      let hasPeaks = false
 
       for (let i = 0; i < totalBars; i++) {
         const ratio = i / totalBars
@@ -174,32 +189,54 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
           smoothH = currentHeights[i] ?? 4
         }
 
+        if (smoothH > 8) hasHalos = true
+        if (!isCompact && peaks[i] > 6) hasPeaks = true
+      }
+
+      // 1. Pase agrupado de halos (1 sola llamada de dibujo GPU)
+      if (hasHalos) {
+        ctx.globalAlpha = 0.22
+        ctx.fillStyle = gradient
+        ctx.beginPath()
+        for (let i = 0; i < totalBars; i++) {
+          const smoothH = currentHeights[i] ?? 4
+          if (smoothH > 8) {
+            const x = i * (barWidth + gap)
+            const y = drawHeight - smoothH
+            ctx.rect(x - 1, Math.max(0, y - 1), barWidth + 2, smoothH + 1)
+          }
+        }
+        ctx.fill()
+        ctx.globalAlpha = 1
+      }
+
+      // 2. Pase agrupado de barras principales (1 sola llamada de dibujo GPU)
+      ctx.fillStyle = gradient
+      ctx.beginPath()
+      for (let i = 0; i < totalBars; i++) {
+        const smoothH = currentHeights[i] ?? 4
         const x = i * (barWidth + gap)
         const y = drawHeight - smoothH
-
-        // Halo suave directo en canvas (mucho más ligero que CSS filter: drop-shadow por frame)
-        if (smoothH > 8) {
-          ctx.globalAlpha = 0.22
-          ctx.fillStyle = gradient
-          ctx.fillRect(x - 1, Math.max(0, y - 1), barWidth + 2, smoothH + 1)
-          ctx.globalAlpha = 1
-        }
-
-        ctx.fillStyle = gradient
-        const radius = Math.min(barWidth / 2, 4)
-        ctx.beginPath()
         if (ctx.roundRect) {
           ctx.roundRect(x, y, barWidth, smoothH, [radius, radius, 1, 1])
         } else {
           ctx.rect(x, y, barWidth, smoothH)
         }
-        ctx.fill()
+      }
+      ctx.fill()
 
-        if (!isCompact && peaks[i] > 6) {
-          const peakY = drawHeight - peaks[i] - 3
-          ctx.fillStyle = peakColor
-          ctx.fillRect(x, Math.max(0, peakY), barWidth, 2)
+      // 3. Pase agrupado de picos flotantes (1 sola llamada de dibujo GPU)
+      if (hasPeaks) {
+        ctx.fillStyle = peakColor
+        ctx.beginPath()
+        for (let i = 0; i < totalBars; i++) {
+          if (peaks[i] > 6) {
+            const x = i * (barWidth + gap)
+            const peakY = drawHeight - peaks[i] - 3
+            ctx.rect(x, Math.max(0, peakY), barWidth, 2)
+          }
         }
+        ctx.fill()
       }
 
       return hasMotion
@@ -249,11 +286,13 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
   }, [analyserRef, audioContextRef, initAudioAnalyser, height, barCount, isCompact])
 
   // ------------------------------------------------------------------
-  // Efecto B: control del rAF. Corre mientras isPlaying sea true o las barras estén decayendo.
+  // Efecto B: control del rAF. Corre solo cuando la ventana es visible y (isPlaying o decaimiento activo).
   // ------------------------------------------------------------------
   useEffect(() => {
     let lastFrameTime = 0
     const TARGET_FRAME_MS = 1000 / 60 // ~60 FPS
+
+    const isVisible = () => !document.hidden && isWindowVisibleRef.current
 
     const stop = () => {
       if (animFrameRef.current != null) {
@@ -264,7 +303,7 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
 
     const tick = (now) => {
       animFrameRef.current = null
-      if (!drawRef.current || document.hidden) return
+      if (!drawRef.current || !isVisible()) return
 
       const elapsed = now - lastFrameTime
       let keepRunning = isPlayingRef.current
@@ -272,17 +311,22 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
         lastFrameTime = now - (elapsed % TARGET_FRAME_MS)
         keepRunning = drawRef.current(true)
       } else {
-        keepRunning = true
+        keepRunning = isPlayingRef.current || hasResidualDecay()
       }
 
-      if ((isPlayingRef.current || keepRunning) && !document.hidden && drawRef.current) {
+      if ((isPlayingRef.current || keepRunning) && isVisible() && drawRef.current) {
         animFrameRef.current = requestAnimationFrame(tick)
       }
     }
 
     const start = () => {
-      if (document.hidden) {
+      if (!isVisible()) {
         stop()
+        return
+      }
+      if (!isPlayingRef.current && !hasResidualDecay()) {
+        stop()
+        drawRef.current?.(false)
         return
       }
       if (animFrameRef.current == null) {
@@ -294,7 +338,7 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
     startLoopRef.current = start
 
     const onVisibility = () => {
-      if (document.hidden) {
+      if (!isVisible()) {
         stop()
       } else {
         start()
@@ -302,10 +346,19 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
     }
 
     document.addEventListener('visibilitychange', onVisibility)
+    let unsubMainVisibility = null
+    if (window.electronAPI?.onMainWindowVisibility) {
+      unsubMainVisibility = window.electronAPI.onMainWindowVisibility((visible) => {
+        isWindowVisibleRef.current = Boolean(visible)
+        onVisibility()
+      })
+    }
+
     start()
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
+      if (unsubMainVisibility) unsubMainVisibility()
       startLoopRef.current = null
       stop()
     }

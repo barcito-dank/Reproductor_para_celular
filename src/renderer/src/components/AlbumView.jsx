@@ -1,5 +1,9 @@
 import { usePlayer } from '../context/PlayerContext'
-import React, { useState, useMemo, useCallback } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { areSameTrack } from '../utils/trackUtils'
+
+const ALBUM_ROW_HEIGHT = 63 // 60px alto de fila + 3px margen inferior
+const ALBUM_OVERSCAN = 8
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -76,6 +80,10 @@ function AlbumView() {
   const { selectedAlbum, playAlbum, playTrack, currentTrack, isPlaying, isLoading, library } = usePlayer()
   const [filterText, setFilterText] = useState('')
   const [sortBy, setSortBy] = useState('default') // 'default' | 'title-asc' | 'title-desc' | 'artist-asc' | 'artist-desc'
+  const listRef = useRef(null)
+  const [startIndex, setStartIndex] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(680)
+  const prevAlbumIdRef = useRef(null)
 
   // Alternar orden por título: default -> A-Z -> Z-A -> default
   const handleToggleTitleSort = useCallback(() => {
@@ -139,6 +147,61 @@ function AlbumView() {
     }
   }, [selectedAlbum, filterText, sortBy])
 
+  const updateVisibleWindow = useCallback(() => {
+    const listEl = listRef.current
+    if (!listEl) return
+    const scrollContainer = listEl.closest('.main-view')
+    if (!scrollContainer) return
+
+    const viewH = scrollContainer.clientHeight > 0 ? scrollContainer.clientHeight : 680
+    const listOffsetTop = listEl.offsetTop
+    const relativeScroll = Math.max(0, scrollContainer.scrollTop - listOffsetTop)
+    const nextStart = Math.max(0, Math.floor(relativeScroll / ALBUM_ROW_HEIGHT) - ALBUM_OVERSCAN)
+
+    setStartIndex((prev) => (prev === nextStart ? prev : nextStart))
+    setViewportHeight((prev) => (Math.abs(prev - viewH) > 4 ? viewH : prev))
+  }, [])
+
+  // Suscribir al scroll y resize del contenedor .main-view
+  useEffect(() => {
+    if (isLoading || !selectedAlbum) return undefined
+    const listEl = listRef.current
+    if (!listEl) return undefined
+    const scrollContainer = listEl.closest('.main-view')
+    if (!scrollContainer) return undefined
+
+    const onScroll = () => updateVisibleWindow()
+    scrollContainer.addEventListener('scroll', onScroll, { passive: true })
+
+    const ro = new ResizeObserver(() => updateVisibleWindow())
+    ro.observe(scrollContainer)
+
+    updateVisibleWindow()
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', onScroll)
+      ro.disconnect()
+    }
+  }, [isLoading, selectedAlbum, updateVisibleWindow])
+
+  // Reiniciar scroll al cambiar de álbum y recalcular ventana al filtrar/ordenar
+  useEffect(() => {
+    const listEl = listRef.current
+    const scrollContainer = listEl?.closest('.main-view')
+    const currentAlbumId = selectedAlbum?.id ?? null
+
+    if (prevAlbumIdRef.current !== currentAlbumId) {
+      prevAlbumIdRef.current = currentAlbumId
+      if (scrollContainer) {
+        scrollContainer.scrollTop = 0
+      }
+      setStartIndex(0)
+      return
+    }
+
+    updateVisibleWindow()
+  }, [selectedAlbum?.id, displayTracks.length, filterText, sortBy, updateVisibleWindow])
+
   const totalDuration = useMemo(() => {
     if (!selectedAlbum?.tracks) return 0
     return selectedAlbum.tracks.reduce((acc, t) => acc + (t.duration || 0), 0)
@@ -173,6 +236,13 @@ function AlbumView() {
   }
 
   const album = selectedAlbum
+  const totalRows = displayTracks.length
+  const visibleCount = Math.ceil(viewportHeight / ALBUM_ROW_HEIGHT) + ALBUM_OVERSCAN * 2
+  const clampedStart = totalRows > 0 ? Math.min(startIndex, Math.max(0, totalRows - 1)) : 0
+  const endIndex = Math.min(totalRows, clampedStart + visibleCount)
+  const topSpacer = clampedStart * ALBUM_ROW_HEIGHT
+  const bottomSpacer = Math.max(0, (totalRows - endIndex) * ALBUM_ROW_HEIGHT)
+  const visibleTracks = displayTracks.slice(clampedStart, endIndex)
 
   return (
     <div className="album-view">
@@ -296,16 +366,25 @@ function AlbumView() {
         <span className="col-duration">Duración</span>
       </div>
 
-      {/* Lista de Canciones */}
-      <ul className="track-list">
-        {displayTracks.map((track, idx) => {
-          const isThisTrackActive = currentTrack?.id === track.id
+      {/* Lista de Canciones (Virtualizada para máximo rendimiento en álbumes grandes) */}
+      <ul
+        className="track-list"
+        ref={listRef}
+        style={
+          totalRows > 0
+            ? { paddingTop: `${topSpacer}px`, paddingBottom: `${bottomSpacer}px` }
+            : undefined
+        }
+      >
+        {visibleTracks.map((track, offsetIdx) => {
+          const realIndex = clampedStart + offsetIdx
+          const isThisTrackActive = areSameTrack(currentTrack, track, Boolean(album.isAllTracks))
 
           return (
             <TrackRow
               key={track.id}
               track={track}
-              index={idx}
+              index={realIndex}
               isActive={isThisTrackActive}
               isPlaying={isThisTrackActive ? isPlaying : false}
               onSelectTrack={handleSelectTrack}

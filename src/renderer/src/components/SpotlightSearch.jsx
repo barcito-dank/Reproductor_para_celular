@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { usePlayer } from '../context/PlayerContext'
+import { getTrackUniqueKey, areSameTrack } from '../utils/trackUtils'
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -15,23 +16,31 @@ function SpotlightSearch({ isOpen, onClose }) {
   const inputRef = useRef(null)
   const listRef = useRef(null)
 
-  // Aplanar todas las pistas de la biblioteca (más de 1.500 canciones)
+  // Aplanar pistas únicas de la biblioteca (más de 1.300 canciones únicas)
   const allTracks = useMemo(() => {
     if (!allAlbums || allAlbums.length === 0) return []
     const list = []
-    const seenIds = new Set()
+    const seenByKey = new Map()
 
     for (const album of allAlbums) {
       if (!album.tracks) continue
       for (const track of album.tracks) {
-        if (!seenIds.has(track.id)) {
-          seenIds.add(track.id)
+        const uniqueKey = getTrackUniqueKey(track)
+        const cover = track.cover || album.cover || null
+        if (!seenByKey.has(uniqueKey)) {
+          seenByKey.set(uniqueKey, list.length)
           list.push({
             ...track,
+            uniqueKey,
             albumObj: album,
             albumName: album.name,
-            cover: track.cover || album.cover
+            cover
           })
+        } else {
+          const existingIdx = seenByKey.get(uniqueKey)
+          if (existingIdx !== undefined && !list[existingIdx].cover && cover) {
+            list[existingIdx] = { ...list[existingIdx], cover }
+          }
         }
       }
     }
@@ -164,7 +173,7 @@ function SpotlightSearch({ isOpen, onClose }) {
           ) : (
             filteredResults.map((item, idx) => {
               const isSelected = idx === selectedIndex
-              const isCurrentPlaying = currentTrack?.id === item.id
+              const isCurrentPlaying = areSameTrack(currentTrack, item, true)
 
               return (
                 <div

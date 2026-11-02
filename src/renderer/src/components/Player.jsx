@@ -220,7 +220,7 @@ function Player() {
       {/* Visualizador de espectro real en tiempo real */}
       {showVisualizer && currentTrack && (
         <div className="player-visualizer-dock">
-          <AudioVisualizer height={46} barCount={46} />
+          <AudioVisualizer height={38} barCount={46} />
         </div>
       )}
 

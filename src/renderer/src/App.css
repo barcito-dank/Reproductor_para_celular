@@ -62,7 +62,7 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -70,12 +70,67 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-hover);
-  border-radius: 3px;
+  background: rgba(152, 152, 176, 0.32);
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-dim);
+  background: var(--text-secondary);
+}
+
+/* Barra de desplazamiento más gruesa y fácil de sujetar en el listado de canciones del álbum seleccionado */
+.main-view::-webkit-scrollbar {
+  width: 15px;
+}
+
+.main-view::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  margin: 4px 0;
+}
+
+.main-view::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  background: rgba(152, 152, 184, 0.48);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+
+.main-view::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.main-view::-webkit-scrollbar-thumb:active {
+  background: var(--accent-hover);
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+:root[data-theme='light'] .main-view::-webkit-scrollbar-track {
+  background: rgba(32, 33, 43, 0.05);
+  border-left: 1px solid rgba(32, 33, 43, 0.08);
+}
+
+:root[data-theme='light'] .main-view::-webkit-scrollbar-thumb {
+  background: rgba(94, 96, 112, 0.42);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+:root[data-theme='light'] .main-view::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+:root[data-theme='light'] .main-view::-webkit-scrollbar-thumb:active {
+  background: var(--accent-dim);
+  border: 1px solid transparent;
+  background-clip: padding-box;
 }
 
 /* ================================ */
@@ -173,14 +228,15 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
 .app-content {
   flex: 1;
+  min-height: 0;
   display: flex;
   overflow: hidden;
-  height: calc(100vh - var(--titlebar-height) - var(--player-height));
 }
 
 /* ================================ */
@@ -188,6 +244,7 @@ body {
 /* ================================ */
 .sidebar {
   width: var(--sidebar-width);
+  min-height: 0;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -196,22 +253,23 @@ body {
 }
 
 .sidebar-header {
-  padding: 20px 16px 12px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .sidebar-header h2 {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.5px;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .sidebar-search {
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 12px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -232,15 +290,16 @@ body {
 
 .album-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 8px;
+  padding: 8px 8px 28px;
 }
 
 .album-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 11px;
+  padding: 8px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: var(--transition);
@@ -257,8 +316,8 @@ body {
 }
 
 .album-item-cover {
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-sm);
   object-fit: cover;
   flex-shrink: 0;
@@ -266,15 +325,15 @@ body {
 }
 
 .album-item-cover-placeholder {
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--accent-dim), var(--accent));
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .album-item-info {
@@ -418,6 +477,7 @@ body {
 .main-stage {
   position: relative;
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -428,7 +488,9 @@ body {
   position: relative;
   z-index: var(--z-content);
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  margin-right: 3px;
   padding: 0;
 }
 
@@ -450,20 +512,20 @@ body {
 .album-view {
   position: relative;
   z-index: var(--z-content);
-  padding: 32px 32px 72px;
+  padding: 24px 28px 44px;
 }
 
 .album-header {
   display: flex;
-  gap: 28px;
-  margin-bottom: 24px;
+  gap: 24px;
+  margin-bottom: 18px;
   align-items: flex-end;
 }
 
 .album-cover-wrapper {
   position: relative;
-  width: 200px;
-  height: 200px;
+  width: 168px;
+  height: 168px;
   flex-shrink: 0;
 }
 
@@ -485,8 +547,8 @@ body {
 .album-cover-large {
   position: relative;
   z-index: 1;
-  width: 200px;
-  height: 200px;
+  width: 168px;
+  height: 168px;
   border-radius: var(--radius-lg);
   object-fit: cover;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
@@ -496,15 +558,15 @@ body {
 .album-cover-large-placeholder {
   position: relative;
   z-index: 1;
-  width: 200px;
-  height: 200px;
+  width: 168px;
+  height: 168px;
   border-radius: var(--radius-lg);
   background: linear-gradient(135deg, var(--accent-dim), var(--accent));
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 64px;
+  font-size: 56px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
 }
 
@@ -520,11 +582,11 @@ body {
   letter-spacing: 1.5px;
   color: var(--accent);
   font-weight: 700;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .album-info h1 {
-  font-size: 36px;
+  font-size: 32px;
   font-weight: 800;
   line-height: 1.1;
   margin-bottom: 8px;
@@ -534,7 +596,7 @@ body {
 .album-info-meta {
   font-size: 14px;
   color: var(--text-secondary);
-  margin-bottom: 20px;
+  margin-bottom: 14px;
 }
 
 .play-album-btn {
@@ -774,6 +836,7 @@ body {
   display: flex;
   align-items: center;
   gap: 14px;
+  height: 60px;
   padding: 8px 14px;
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -781,8 +844,7 @@ body {
   font-variant-numeric: tabular-nums;
   margin-bottom: 3px;
   position: relative;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 60px;
+  box-sizing: border-box;
 }
 
 .track-item:hover {
@@ -1946,6 +2008,21 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.mini-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
+.mini-mode-switch .badge-pill {
+  border-color: transparent;
+  background: transparent;
+}
+
 .badge-pill {
   font-size: 10px;
   font-weight: 700;
@@ -1972,6 +2049,34 @@ body {
   background: rgba(124, 92, 252, 0.15);
   color: var(--accent);
   border-color: rgba(124, 92, 252, 0.35);
+}
+
+.badge-pill.pin-mode-pill.on {
+  background: rgba(255, 184, 77, 0.18);
+  color: #ffb84d;
+  border-color: rgba(255, 184, 77, 0.4);
+}
+
+.badge-pill.autohide-mode-pill.on {
+  background: rgba(92, 225, 230, 0.16);
+  color: #5ce1e6;
+  border-color: rgba(92, 225, 230, 0.38);
+}
+
+:root[data-theme='light'] .mini-mode-switch {
+  background: var(--bg-secondary);
+}
+
+:root[data-theme='light'] .badge-pill.pin-mode-pill.on {
+  background: rgba(217, 119, 6, 0.14);
+  color: #b45309;
+  border-color: rgba(217, 119, 6, 0.35);
+}
+
+:root[data-theme='light'] .badge-pill.autohide-mode-pill.on {
+  background: rgba(8, 145, 178, 0.14);
+  color: #0e7490;
+  border-color: rgba(8, 145, 178, 0.35);
 }
 
 .mini-settings-badges .volume-pill {
@@ -2714,18 +2819,14 @@ body {
 }
 
 .player-visualizer-dock {
-  position: absolute;
-  bottom: var(--player-height);
-  left: 0;
-  right: 0;
+  position: relative;
   z-index: var(--z-visualizer);
   pointer-events: none;
-  background: rgba(14, 14, 22, 0.92);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(14, 14, 22, 0.96);
   border-top: 1px solid rgba(124, 92, 252, 0.25);
-  padding: 6px 20px 2px;
+  padding: 4px 20px 2px;
   overflow: hidden;
+  flex-shrink: 0;
   will-change: transform, opacity;
   animation: slideUpVis 0.2s cubic-bezier(0.22, 1, 0.36, 1);
   transition: background var(--transition), border-color var(--transition);

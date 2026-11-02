@@ -1,7 +1,29 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { getTrackUniqueKey, TODOS_ALBUM_COVER } from '../utils/trackUtils'
 
 const PlayerContext = createContext(null)
 const PlayerTimeContext = createContext({ currentTime: 0 })
+
+const SESSION_STORAGE_KEY = 'musicPlayerSessionState'
+
+function loadSavedSession() {
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch (_) {
+    return null
+  }
+}
+
+function resolveAudioSrc(track) {
+  if (!track) return ''
+  if (track.fileUrl) return track.fileUrl
+  const normalized = (track.path || '').replace(/\\/g, '/')
+  const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
+  return encodeURI(fileUrl).replace(/#/g, '%23')
+}
 
 // Helper para encontrar el primer álbum reproducible en la jerarquía
 function findFirstAlbum(nodes) {
@@ -34,6 +56,11 @@ function getAllAlbums(nodes) {
 
 export function PlayerProvider({ children, isMiniPanel = false }) {
   const audioRef = useRef(new Audio())
+  const savedSessionRef = useRef(!isMiniPanel ? loadSavedSession() : null)
+  const sessionRestoredRef = useRef(false)
+  const pendingRestoreSeekRef = useRef(null)
+  const lastSessionSaveAtRef = useRef(0)
+
   const [rawLibrary, setRawLibrary] = useState([]) // Árbol jerárquico original de carpetas y álbumes
   const [currentTrack, setCurrentTrack] = useState(null)
   const [currentAlbum, setCurrentAlbum] = useState(null)
@@ -42,9 +69,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [volume, setVolume] = useState(0.8)
-  const [shuffle, setShuffle] = useState(false)
-  const [loop, setLoop] = useState('none') // 'none' | 'all' | 'one'
+  const [volume, setVolume] = useState(() => {
+    const savedVol = savedSessionRef.current?.volume
+    return typeof savedVol === 'number' && !isNaN(savedVol)
+      ? Math.max(0, Math.min(1, savedVol))
+      : 0.8
+  })
+  const [shuffle, setShuffle] = useState(() => Boolean(savedSessionRef.current?.shuffle))
+  const [loop, setLoop] = useState(() => {
+    const savedLoop = savedSessionRef.current?.loop
+    return savedLoop === 'all' || savedLoop === 'one' ? savedLoop : 'none'
+  }) // 'none' | 'all' | 'one'
   const [isLoading, setIsLoading] = useState(true)
   const [selectedAlbum, setSelectedAlbum] = useState(null)
   const [musicDirectory, setMusicDirectory] = useState(() => (
@@ -54,25 +89,35 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   // allAlbums memoizado estrictamente basado en rawLibrary (se calcula una sola vez tras escanear)
   const allAlbums = useMemo(() => getAllAlbums(rawLibrary), [rawLibrary])
 
-  // Álbum virtual "Todas" con todas las canciones de todos los álbumes
+  // Álbum virtual "Todos" con canciones únicas de todos los álbumes y carátula genérica propia
   const allTracksAlbum = useMemo(() => {
     if (!allAlbums || allAlbums.length === 0) return null
     const tracks = []
-    const seenIds = new Set()
-    let firstCover = null
+    const seenByKey = new Map()
 
     for (const album of allAlbums) {
       if (!album.tracks) continue
       for (const track of album.tracks) {
-        if (!seenIds.has(track.id)) {
-          seenIds.add(track.id)
-          const cover = track.cover || album.cover || null
-          if (!firstCover && cover) firstCover = cover
+        const uniqueKey = getTrackUniqueKey(track)
+        const cover = track.cover || album.cover || null
+
+        if (!seenByKey.has(uniqueKey)) {
+          seenByKey.set(uniqueKey, tracks.length)
           tracks.push({
             ...track,
+            uniqueKey,
             cover,
             albumName: album.name
           })
+        } else {
+          // Si la primera copia encontrada no tenía carátula y otra copia en otro álbum sí tiene, conservar la carátula
+          const existingIdx = seenByKey.get(uniqueKey)
+          if (existingIdx !== undefined && !tracks[existingIdx].cover && cover) {
+            tracks[existingIdx] = {
+              ...tracks[existingIdx],
+              cover
+            }
+          }
         }
       }
     }
@@ -83,16 +128,16 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       id: '__all_tracks__',
       type: 'album',
       isAllTracks: true,
-      name: 'Todas',
+      name: 'Todos',
       path: '',
       categoryPath: 'Biblioteca Completa',
-      cover: firstCover,
+      cover: TODOS_ALBUM_COVER,
       trackCount: tracks.length,
       tracks
     }
   }, [allAlbums])
 
-  // Biblioteca final incluyendo el álbum "Todas" al principio
+  // Biblioteca final incluyendo el álbum "Todos" al principio
   const library = useMemo(() => {
     if (!allTracksAlbum) return rawLibrary
     return [allTracksAlbum, ...rawLibrary]
@@ -113,17 +158,80 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     setIsLoading(false)
   }, []) // Dependencias vacías: NUNCA se vuelve a ejecutar al seleccionar un álbum
 
-  // Seleccionar automáticamente el álbum "Todas" (o el primero disponible) al cargar la biblioteca
+  // Restaurar sesión guardada (álbum, pista y posición) o seleccionar "Todos" al cargar la biblioteca
   useEffect(() => {
-    if (isMiniPanel) return
-    if (library.length > 0) {
-      setSelectedAlbum(prev => {
-        if (!prev) return allTracksAlbum || findFirstAlbum(library)
-        if (prev.id === '__all_tracks__' && allTracksAlbum) return allTracksAlbum
-        return prev
-      })
+    if (isMiniPanel || library.length === 0) return
+
+    if (!sessionRestoredRef.current) {
+      sessionRestoredRef.current = true
+      const saved = savedSessionRef.current
+      const candidateAlbums = [allTracksAlbum, ...allAlbums].filter(Boolean)
+      const findAlbumById = (id) => (id ? candidateAlbums.find((a) => a.id === id) : null)
+
+      const restoredSelectedAlbum =
+        findAlbumById(saved?.selectedAlbumId) || allTracksAlbum || findFirstAlbum(library)
+      setSelectedAlbum(restoredSelectedAlbum)
+
+      const restoredCurrentAlbum =
+        findAlbumById(saved?.currentAlbumId) || restoredSelectedAlbum
+
+      if (saved?.currentTrackId && restoredCurrentAlbum?.tracks?.length > 0) {
+        let resolvedAlbum = restoredCurrentAlbum
+        let foundIndex = resolvedAlbum.tracks.findIndex((t) => t.id === saved.currentTrackId)
+
+        if (foundIndex === -1 && allTracksAlbum?.tracks?.length > 0) {
+          const idxInAll = allTracksAlbum.tracks.findIndex((t) => t.id === saved.currentTrackId)
+          if (idxInAll !== -1) {
+            resolvedAlbum = allTracksAlbum
+            foundIndex = idxInAll
+          }
+        }
+
+        if (foundIndex !== -1) {
+          const foundTrack = resolvedAlbum.tracks[foundIndex]
+          const restoredTime =
+            typeof saved.currentTime === 'number' &&
+            !isNaN(saved.currentTime) &&
+            saved.currentTime > 0 &&
+            (!foundTrack.duration || saved.currentTime < foundTrack.duration - 1)
+              ? saved.currentTime
+              : 0
+
+          setCurrentAlbum(resolvedAlbum)
+          setPlaylist(resolvedAlbum.tracks)
+          setPlaylistIndex(foundIndex)
+          setCurrentTrack(foundTrack)
+          if (foundTrack.duration) {
+            setDuration(foundTrack.duration)
+          }
+          setCurrentTime(restoredTime)
+
+          const audio = audioRef.current
+          pendingRestoreSeekRef.current = restoredTime
+          audio.src = resolveAudioSrc(foundTrack)
+          if (restoredTime > 0) {
+            try {
+              audio.currentTime = restoredTime
+            } catch (_) {}
+          }
+          window.electronAPI.sendPlayerTime?.(restoredTime)
+          return
+        }
+      }
+
+      if (restoredSelectedAlbum?.tracks?.length > 0) {
+        setPlaylist(restoredSelectedAlbum.tracks)
+        setCurrentAlbum(restoredSelectedAlbum)
+      }
+      return
     }
-  }, [isMiniPanel, library, allTracksAlbum])
+
+    setSelectedAlbum((prev) => {
+      if (!prev) return allTracksAlbum || findFirstAlbum(library)
+      if (prev.id === '__all_tracks__' && allTracksAlbum) return allTracksAlbum
+      return prev
+    })
+  }, [isMiniPanel, library, allTracksAlbum, allAlbums])
 
   // Precargar cola de reproducción inicial cuando aún no suena ninguna pista para sincronizar el MiniPanel desde el arranque
   useEffect(() => {
@@ -138,6 +246,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     window.localStorage.setItem('musicPlayerDirectory', directory)
     setMusicDirectory(directory)
     setSelectedAlbum(null)
+    sessionRestoredRef.current = false
     await loadLibrary(directory)
   }, [loadLibrary])
 
@@ -228,6 +337,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   // Carga un archivo de audio en el elemento Audio y actualiza estados de reproducción
   const loadAndPlayTrack = useCallback((track, album = null, index = -1) => {
     const audio = audioRef.current
+    pendingRestoreSeekRef.current = null
 
     // Inicializar o reanudar Web Audio Analyser
     initAudioAnalyser()
@@ -250,13 +360,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     lastTimeSyncRef.current = performance.now()
     window.electronAPI.sendPlayerTime?.(0)
 
-    if (track.fileUrl) {
-      audio.src = track.fileUrl
-    } else {
-      const normalized = track.path.replace(/\\/g, '/')
-      const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
-      audio.src = encodeURI(fileUrl).replace(/#/g, '%23')
-    }
+    audio.src = resolveAudioSrc(track)
 
     const playPromise = audio.play()
     if (playPromise !== undefined) {
@@ -328,15 +432,39 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser])
 
+  const persistSession = useCallback((overrideTime) => {
+    if (isMiniPanel || !sessionRestoredRef.current) return
+    try {
+      const timeToSave =
+        typeof overrideTime === 'number' && !isNaN(overrideTime)
+          ? overrideTime
+          : audioRef.current
+            ? audioRef.current.currentTime
+            : 0
+      const payload = {
+        volume,
+        shuffle,
+        loop,
+        selectedAlbumId: selectedAlbum?.id || null,
+        currentAlbumId: currentAlbum?.id || null,
+        currentTrackId: currentTrack?.id || null,
+        currentTime: timeToSave
+      }
+      window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload))
+    } catch (_) {}
+  }, [isMiniPanel, volume, shuffle, loop, selectedAlbum, currentAlbum, currentTrack])
+
   // Navegar a posición de tiempo (scrubbing)
   const seekTo = useCallback((time) => {
     if (audioRef.current && !isNaN(time)) {
+      pendingRestoreSeekRef.current = null
       audioRef.current.currentTime = time
       setCurrentTime(time)
       lastTimeSyncRef.current = performance.now()
       window.electronAPI.sendPlayerTime?.(time)
+      persistSession(time)
     }
-  }, [])
+  }, [persistSession])
 
   // Control de volumen
   const setVolumeLevel = useCallback((v) => {
@@ -545,9 +673,26 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         lastTimeSyncRef.current = now
         window.electronAPI.sendPlayerTime?.(t)
       }
+      // Guardar progreso de sesión de forma espaciada (~2s) para no sobrecargar localStorage
+      if (now - lastSessionSaveAtRef.current >= 2000) {
+        lastSessionSaveAtRef.current = now
+        persistSession(t)
+      }
     }
     const onDurationChange = () => { if (audio.duration) setDuration(audio.duration) }
-    const onLoadedMetadata = () => { if (audio.duration) setDuration(audio.duration) }
+    const onLoadedMetadata = () => {
+      if (audio.duration) setDuration(audio.duration)
+      if (pendingRestoreSeekRef.current != null) {
+        const target = pendingRestoreSeekRef.current
+        pendingRestoreSeekRef.current = null
+        if (target > 0 && (!audio.duration || target < audio.duration)) {
+          try {
+            audio.currentTime = target
+            setCurrentTime(target)
+          } catch (_) {}
+        }
+      }
+    }
     const onEnded = () => handleTrackEnd()
     const onPlay = () => {
       setIsPlaying(true)
@@ -564,6 +709,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     const onPause = () => {
       if (audio.paused) {
         setIsPlaying(false)
+        persistSession(audio.currentTime)
       }
     }
 
@@ -584,7 +730,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPause)
     }
-  }, [handleTrackEnd, volume])
+  }, [handleTrackEnd, volume, persistSession])
+
+  // Persistir sesión ante cambios de pista, álbum, volumen, bucle o aleatorio y al cerrar ventana
+  useEffect(() => {
+    if (isMiniPanel || isLoading) return
+    persistSession()
+
+    const handleBeforeUnload = () => persistSession()
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [isMiniPanel, isLoading, persistSession])
 
   // Sincronizar estado con otras ventanas (Mini Panel) desde el inicio y ante cambios de controles o pista
   // Optimización de payload: la playlist completa solo se transfiere cuando realmente cambia la referencia

@@ -13,6 +13,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restoreMainWindow: () => ipcRenderer.send('restore-main-window'),
   toggleMainAlwaysOnTop: () => ipcRenderer.invoke('toggle-main-always-on-top'),
   getMainAlwaysOnTop: () => ipcRenderer.invoke('get-main-always-on-top'),
+  onMainWindowVisibility: (callback) => {
+    const handler = (_, visible) => callback(visible)
+    ipcRenderer.on('main-window-visibility', handler)
+    return () => ipcRenderer.removeListener('main-window-visibility', handler)
+  },
 
   // Estado del reproductor (sync entre ventanas)
   sendPlayerState: (state) => ipcRenderer.send('player-state-update', state),

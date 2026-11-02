@@ -29,10 +29,44 @@ let lastPlayerState = null
 let lastPlaylist = []
 let lastCurrentTime = 0
 
-// Opciones de configuración de la barra lateral
+// Opciones de configuración de la barra lateral (modos estrictamente alternativos: Fija vs Ocultamiento Automático)
 let panelSettings = {
-  pinned: false,    // "mantenerla siempre visible"
+  pinned: false,    // "mantenerla siempre visible (fija)"
   autoHide: true    // "ocultar la barra lateral en caso de tocar otra cosa (blur)"
+}
+
+function resolveExclusivePanelSettings(incoming, current = panelSettings) {
+  if (!incoming || typeof incoming !== 'object') {
+    const pinned = Boolean(current.pinned)
+    return { pinned, autoHide: !pinned }
+  }
+
+  const hasPinned = typeof incoming.pinned === 'boolean'
+  const hasAutoHide = typeof incoming.autoHide === 'boolean'
+
+  if (hasPinned && hasAutoHide) {
+    if (incoming.pinned !== incoming.autoHide) {
+      return { pinned: incoming.pinned, autoHide: incoming.autoHide }
+    }
+    if (incoming.pinned !== current.pinned) {
+      return { pinned: incoming.pinned, autoHide: !incoming.pinned }
+    }
+    if (incoming.autoHide !== current.autoHide) {
+      return { pinned: !incoming.autoHide, autoHide: incoming.autoHide }
+    }
+    return { pinned: incoming.pinned, autoHide: !incoming.pinned }
+  }
+
+  if (hasPinned) {
+    return { pinned: incoming.pinned, autoHide: !incoming.pinned }
+  }
+
+  if (hasAutoHide) {
+    return { pinned: !incoming.autoHide, autoHide: incoming.autoHide }
+  }
+
+  const pinned = Boolean(current.pinned)
+  return { pinned, autoHide: !pinned }
 }
 
 const DRAWER_WIDTH = 340
@@ -58,11 +92,15 @@ function getAppIconPath() {
 }
 
 function createMainWindow() {
+  const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize
+  const initialWidth = Math.max(960, Math.min(1200, Math.round(workWidth * 0.84)))
+  const initialHeight = Math.max(680, Math.min(880, Math.round(workHeight * 0.9)))
+
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 750,
+    width: initialWidth,
+    height: initialHeight,
     minWidth: 800,
-    minHeight: 600,
+    minHeight: 620,
     frame: false,
     backgroundColor: '#0f0f13',
     titleBarStyle: 'hidden',
@@ -86,6 +124,9 @@ function createMainWindow() {
   }
 
   mainWindow.on('minimize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('main-window-visibility', false)
+    }
     expandGraceUntil = Date.now() + 500
     if (!isSidePanelExpanded) {
       setSidePanelBounds('expanded')
@@ -96,8 +137,23 @@ function createMainWindow() {
   })
 
   mainWindow.on('restore', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('main-window-visibility', true)
+    }
     if (panelSettings.autoHide && !panelSettings.pinned) {
       setSidePanelBounds('collapsed')
+    }
+  })
+
+  mainWindow.on('show', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('main-window-visibility', true)
+    }
+  })
+
+  mainWindow.on('hide', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('main-window-visibility', false)
     }
   })
 
@@ -602,9 +658,10 @@ ipcMain.handle('select-music-directory', async () => {
 
 ipcMain.handle('scan-music', async (_, selectedDirectory) => {
   const musicDir = selectedDirectory || await getMusicDirectory()
+  const userDataDir = app.getPath('userData')
   console.log(`[Biblioteca] Escaneando música desde: ${musicDir}`)
   try {
-    const library = await scanMusicDirectory(musicDir)
+    const library = await scanMusicDirectory(musicDir, userDataDir)
     console.log(`[Biblioteca] ${library.length} álbumes indexados correctamente.`)
     return library
   } catch (err) {
@@ -659,7 +716,7 @@ ipcMain.on('set-side-panel-mode', (_, mode) => {
 })
 
 ipcMain.on('update-panel-settings', (_, newSettings) => {
-  panelSettings = { ...panelSettings, ...newSettings }
+  panelSettings = resolveExclusivePanelSettings(newSettings, panelSettings)
   if (sidePanel && !sidePanel.isDestroyed()) {
     sidePanel.webContents.send('panel-settings-updated', panelSettings)
   }

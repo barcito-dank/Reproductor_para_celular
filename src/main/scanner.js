@@ -1,18 +1,30 @@
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { pathToFileURL } from 'url'
+import { pathToFileURL, fileURLToPath } from 'url'
 import { parseFile } from 'music-metadata'
 
 const SUPPORTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma', '.opus']
 
 // Caché en memoria y en disco para arranque instantáneo
 let metadataCache = {}
-let cacheLoaded = false
+let loadedCacheKey = null
 const knownCovers = new Set()
-let coversDirReady = false
+let activeCoversDir = null
 
-function getCachePath(baseDir) {
+function getDirHash(dirPath) {
+  const normalized = path.resolve(dirPath).toLowerCase()
+  return crypto.createHash('md5').update(normalized).digest('hex').slice(0, 12)
+}
+
+function getPrimaryCachePath(baseDir, userDataDir) {
+  if (userDataDir) {
+    return path.join(userDataDir, 'cache', `library_cache_${getDirHash(baseDir)}.json`)
+  }
+  return path.join(baseDir, '.library_cache.json')
+}
+
+function getLegacyCachePath(baseDir) {
   return path.join(baseDir, '.library_cache.json')
 }
 
@@ -26,44 +38,53 @@ function toFileUrl(filePath) {
 }
 
 /**
- * Asegura la existencia del subdirectorio .covers de forma asíncrona una sola vez
+ * Asegura la existencia del subdirectorio de carátulas en userData (con fallback a baseDir/.covers)
  */
-async function ensureCoversDir(baseDir) {
-  const coversDir = path.join(baseDir, '.covers')
-  if (!coversDirReady) {
+async function ensureCoversDir(baseDir, userDataDir) {
+  if (activeCoversDir) return activeCoversDir
+
+  const candidates = []
+  if (userDataDir) {
+    candidates.push(path.join(userDataDir, 'cache', 'covers'))
+  }
+  candidates.push(path.join(baseDir, '.covers'))
+
+  for (const candidate of candidates) {
     try {
-      await fs.promises.mkdir(coversDir, { recursive: true })
-      coversDirReady = true
+      await fs.promises.mkdir(candidate, { recursive: true })
+      activeCoversDir = candidate
+      return activeCoversDir
     } catch (err) {
-      console.error('Error creando directorio .covers:', err.message)
+      console.warn(`No se pudo crear directorio de carátulas en ${candidate}:`, err.message)
     }
   }
-  return coversDir
+
+  return candidates[0]
 }
 
 /**
- * Guarda los bytes de la carátula integrada en el subdirectorio .covers del directorio de música.
+ * Guarda los bytes de la carátula integrada en el directorio de caché de carátulas.
  * Deduplica automáticamente mediante hash MD5 y caché en memoria.
  */
-async function saveCoverBuffer(baseDir, buffer, format) {
+async function saveCoverBuffer(baseDir, userDataDir, buffer, format) {
   if (!buffer || buffer.length === 0) return null
   try {
-    const coversDir = await ensureCoversDir(baseDir)
+    const coversDir = await ensureCoversDir(baseDir, userDataDir)
     const hash = crypto.createHash('md5').update(buffer).digest('hex')
     const ext = format && format.toLowerCase().includes('png') ? '.png' : '.jpg'
     const fileName = `${hash}${ext}`
     const filePath = path.join(coversDir, fileName)
 
-    if (knownCovers.has(fileName)) {
+    if (knownCovers.has(filePath)) {
       return toFileUrl(filePath)
     }
 
     try {
       await fs.promises.access(filePath)
-      knownCovers.add(fileName)
+      knownCovers.add(filePath)
     } catch (_) {
       await fs.promises.writeFile(filePath, buffer)
-      knownCovers.add(fileName)
+      knownCovers.add(filePath)
     }
 
     return toFileUrl(filePath)
@@ -73,31 +94,44 @@ async function saveCoverBuffer(baseDir, buffer, format) {
   }
 }
 
-async function loadCache(baseDir) {
-  if (cacheLoaded) return
-  try {
-    const cacheFile = getCachePath(baseDir)
-    const raw = await fs.promises.readFile(cacheFile, 'utf8')
-    if (raw.includes('data:image')) {
-      metadataCache = {}
-    } else {
-      metadataCache = JSON.parse(raw)
+async function loadCache(baseDir, userDataDir) {
+  const cacheKey = `${userDataDir || ''}|${path.resolve(baseDir)}`
+  if (loadedCacheKey === cacheKey) return
+
+  const primaryFile = getPrimaryCachePath(baseDir, userDataDir)
+  const legacyFile = getLegacyCachePath(baseDir)
+  const candidates = primaryFile !== legacyFile ? [primaryFile, legacyFile] : [primaryFile]
+
+  metadataCache = {}
+  for (const cacheFile of candidates) {
+    try {
+      const raw = await fs.promises.readFile(cacheFile, 'utf8')
+      if (!raw.includes('data:image')) {
+        metadataCache = JSON.parse(raw)
+        break
+      }
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.warn(`Aviso al cargar caché de ${cacheFile}:`, err.message)
+      }
     }
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.warn(`Aviso al cargar caché de ${baseDir}:`, err.message)
-    }
-    metadataCache = {}
   }
-  cacheLoaded = true
+  loadedCacheKey = cacheKey
 }
 
-async function saveCache(baseDir) {
-  try {
-    const cacheFile = getCachePath(baseDir)
-    await fs.promises.writeFile(cacheFile, JSON.stringify(metadataCache), 'utf8')
-  } catch (err) {
-    console.error('Error guardando caché de metadatos:', err.message)
+async function saveCache(baseDir, userDataDir) {
+  const primaryFile = getPrimaryCachePath(baseDir, userDataDir)
+  const legacyFile = getLegacyCachePath(baseDir)
+  const candidates = primaryFile !== legacyFile ? [primaryFile, legacyFile] : [primaryFile]
+
+  for (const cacheFile of candidates) {
+    try {
+      await fs.promises.mkdir(path.dirname(cacheFile), { recursive: true })
+      await fs.promises.writeFile(cacheFile, JSON.stringify(metadataCache), 'utf8')
+      return
+    } catch (err) {
+      console.warn(`No se pudo guardar caché de metadatos en ${cacheFile}:`, err.message)
+    }
   }
 }
 
@@ -141,7 +175,7 @@ async function findCoverImage(albumDir, preloadedEntries = null) {
  * Extrae metadata de un archivo de audio con soporte para caché por fecha de modificación
  * de forma 100% asíncrona para no bloquear el hilo principal.
  */
-async function extractMetadata(filePath, baseDir) {
+async function extractMetadata(filePath, baseDir, userDataDir) {
   try {
     const stats = await fs.promises.stat(filePath)
     const mtime = stats.mtimeMs
@@ -149,7 +183,21 @@ async function extractMetadata(filePath, baseDir) {
     if (metadataCache[filePath] && metadataCache[filePath].mtime === mtime) {
       const cached = metadataCache[filePath].data
       if (cached && (!cached.embeddedCover || !cached.embeddedCover.startsWith('data:'))) {
-        return cached
+        let coverValid = true
+        if (cached.embeddedCover && cached.embeddedCover.startsWith('file:')) {
+          try {
+            const coverFilePath = fileURLToPath(cached.embeddedCover)
+            if (!knownCovers.has(coverFilePath)) {
+              await fs.promises.access(coverFilePath)
+              knownCovers.add(coverFilePath)
+            }
+          } catch (_) {
+            coverValid = false
+          }
+        }
+        if (coverValid) {
+          return cached
+        }
       }
     }
 
@@ -159,7 +207,7 @@ async function extractMetadata(filePath, baseDir) {
 
     if (common.picture && common.picture.length > 0) {
       const pic = common.picture[0]
-      coverUrl = await saveCoverBuffer(baseDir, pic.data, pic.format)
+      coverUrl = await saveCoverBuffer(baseDir, userDataDir, pic.data, pic.format)
     }
 
     const data = {
@@ -228,7 +276,7 @@ function countTracksRecursive(nodes) {
  * - Si tiene subdirectorios: genera un nodo Tipo 'folder' (barra desplegable sin imagen).
  *   - Si contiene audios propios directos, añade un álbum hijo para ellos.
  */
-async function scanDirectoryNode(dir, baseDir, parentPathName = '', limitMetadata, limitDirScan) {
+async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '', limitMetadata, limitDirScan) {
   let entries = []
   try {
     entries = await fs.promises.readdir(dir, { withFileTypes: true })
@@ -263,7 +311,7 @@ async function scanDirectoryNode(dir, baseDir, parentPathName = '', limitMetadat
     const trackDataList = await Promise.all(
       audioFiles.map((audioFile) =>
         limitMetadata(async () => {
-          const meta = await extractMetadata(audioFile, baseDir)
+          const meta = await extractMetadata(audioFile, baseDir, userDataDir)
           return {
             id: audioFile,
             path: audioFile,
@@ -328,7 +376,7 @@ async function scanDirectoryNode(dir, baseDir, parentPathName = '', limitMetadat
   // Escanear cada subdirectorio con concurrencia controlada
   const subDirNodes = await Promise.all(
     subDirs.map((subDir) =>
-      limitDirScan(() => scanDirectoryNode(subDir, baseDir, currentCategoryPath, limitMetadata, limitDirScan))
+      limitDirScan(() => scanDirectoryNode(subDir, baseDir, userDataDir, currentCategoryPath, limitMetadata, limitDirScan))
     )
   )
 
@@ -365,7 +413,7 @@ async function scanDirectoryNode(dir, baseDir, parentPathName = '', limitMetadat
  *
  * Utiliza I/O asíncrono y concurrencia acotada para evitar congelar el hilo de Electron.
  */
-async function scanMusicDirectory(baseDir) {
+async function scanMusicDirectory(baseDir, userDataDir = null) {
   try {
     await fs.promises.access(baseDir)
   } catch (_) {
@@ -378,7 +426,8 @@ async function scanMusicDirectory(baseDir) {
     return []
   }
 
-  await loadCache(baseDir)
+  activeCoversDir = null
+  await loadCache(baseDir, userDataDir)
 
   let topEntries = []
   try {
@@ -399,7 +448,7 @@ async function scanMusicDirectory(baseDir) {
   const nodes = await Promise.all(
     validDirs.map((entry) => {
       const itemPath = path.join(baseDir, entry.name)
-      return limitDirScan(() => scanDirectoryNode(itemPath, baseDir, '', limitMetadata, limitDirScan))
+      return limitDirScan(() => scanDirectoryNode(itemPath, baseDir, userDataDir, '', limitMetadata, limitDirScan))
     })
   )
 
@@ -408,7 +457,7 @@ async function scanMusicDirectory(baseDir) {
   // Ordenar árbol alfabéticamente
   tree.sort((a, b) => a.name.localeCompare(b.name))
 
-  await saveCache(baseDir)
+  await saveCache(baseDir, userDataDir)
 
   return tree
 }
