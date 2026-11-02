@@ -60,35 +60,60 @@ const TreeNode = React.memo(function TreeNode({
   const draggable = isNodeDraggable(node)
   const isBeingDragged = draggedNode?.id === node.id
   const isDropTarget = dropTargetId === node.id
+  const isAllTracks = Boolean(node.isAllTracks || node.id === '__all_tracks__')
+  const rowRef = useRef(null)
 
   const handleDragStartEdge = (e) => {
     if (!draggable) {
       e.preventDefault()
       return
     }
-    e.stopPropagation()
+    // IMPORTANTE: NO llamar a e.stopPropagation() para que Chromium inicie la sesión nativa de DnD
     e.dataTransfer.effectAllowed = 'move'
     try {
       e.dataTransfer.setData('text/plain', node.path)
-    } catch {
-      // Ignorar si dataTransfer está restringido
+      e.dataTransfer.setData(
+        'application/json',
+        JSON.stringify({
+          id: node.id,
+          path: node.path,
+          name: node.name,
+          depth
+        })
+      )
+    } catch (_) {}
+
+    if (e.dataTransfer.setDragImage && rowRef.current) {
+      e.dataTransfer.setDragImage(rowRef.current, 24, 20)
     }
+
     onDragStartNode(node, depth)
   }
 
-  const handleDragOver = (e) => {
+  const handleDragEnter = (e) => {
+    e.preventDefault()
     e.stopPropagation()
-    // El nodo "Todos" sirve como zona para sacar un álbum al nivel principal (raíz)
-    if (node.isAllTracks && draggedNode && draggedNode.depth > 0) {
-      e.preventDefault()
-      e.dataTransfer.dropEffect = 'move'
-      onDragOverNode(node.id)
+    e.dataTransfer.dropEffect = 'move'
+  }
+
+  const handleDragOver = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+
+    // El nodo virtual "Todos" actúa como zona para sacar cualquier álbum fuera a la raíz
+    if (isAllTracks) {
+      if (dropTargetId !== node.id) {
+        onDragOverNode(node.id)
+      }
       return
     }
+
     if (!canDropIntoNode(draggedNode, node)) return
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    onDragOverNode(node.id)
+
+    if (dropTargetId !== node.id) {
+      onDragOverNode(node.id)
+    }
   }
 
   const handleDragLeave = (e) => {
@@ -100,7 +125,7 @@ const TreeNode = React.memo(function TreeNode({
   const handleDrop = (e) => {
     e.preventDefault()
     e.stopPropagation()
-    onDropOnNode(node)
+    onDropOnNode(node, e.dataTransfer)
   }
 
   const handleContextMenu = (e) => {
@@ -118,7 +143,9 @@ const TreeNode = React.memo(function TreeNode({
       <div className={`folder-group depth-${depth}`}>
         {/* Barra desplegable sin imagen */}
         <div
+          ref={rowRef}
           className={`folder-header-bar ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
+          onDragEnter={handleDragEnter}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -188,18 +215,20 @@ const TreeNode = React.memo(function TreeNode({
     )
   }
 
-  // Nodo Tipo 'album': Álbum convencional con portada
+  // Nodo Tipo 'album': Álbum convencional con portada o virtual "Todos"
   const isSelected = selectedAlbumId === node.id
 
   return (
     <div
-      className={`album-item ${isSelected ? 'active' : ''} depth-${depth} ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
+      ref={rowRef}
+      className={`album-item ${isSelected ? 'active' : ''} ${isAllTracks ? 'album-item-all-tracks' : ''} depth-${depth} ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
+      onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onContextMenu={handleContextMenu}
       onClick={() => onSelectAlbum(node)}
-      title={`${node.name} (${node.trackCount} pistas)`}
+      title={isAllTracks ? 'Colección completa de todas las canciones' : `${node.name} (${node.trackCount} pistas)`}
     >
       {node.cover ? (
         <img
@@ -211,22 +240,27 @@ const TreeNode = React.memo(function TreeNode({
           draggable={false}
         />
       ) : (
-        <div className="album-item-cover-placeholder">💿</div>
+        <div className="album-item-cover-placeholder">{isAllTracks ? '✨' : '💿'}</div>
       )}
       <div className="album-item-info">
-        <div className="album-item-name">{node.name}</div>
+        <div className="album-item-name">
+          {node.name}
+          {isAllTracks && <span className="album-virtual-pill">Colección</span>}
+        </div>
         <div className="album-item-count">
-          {node.trackCount} {node.trackCount === 1 ? 'pista' : 'pistas'}
-          {isDropTarget && !node.isAllTracks && (
+          {isAllTracks
+            ? `Todas las canciones (${node.trackCount})`
+            : `${node.trackCount} ${node.trackCount === 1 ? 'pista' : 'pistas'}`}
+          {isDropTarget && !isAllTracks && (
             <span className="album-drop-hint"> · Soltar dentro</span>
           )}
-          {isDropTarget && node.isAllTracks && (
-            <span className="album-drop-hint"> · Sacar a raíz</span>
+          {isDropTarget && isAllTracks && (
+            <span className="album-drop-hint"> · Sacar al nivel principal</span>
           )}
         </div>
       </div>
 
-      {/* Borde derecho exclusivo para agarrar y arrastrar */}
+      {/* Borde derecho exclusivo para agarrar y arrastrar (solo en álbumes reales de disco) */}
       {draggable && (
         <div
           className="node-drag-edge"
@@ -480,6 +514,7 @@ function Sidebar({ isOpen = true, onToggle }) {
 
   // Estado para Drag & Drop de álbumes
   const [draggedNode, setDraggedNode] = useState(null) // { id, path, name, depth }
+  const draggedNodeRef = useRef(null)
   const [dropTargetId, setDropTargetId] = useState(null) // node.id | '__ROOT__'
   const [sidebarNotice, setSidebarNotice] = useState(null)
   const noticeTimerRef = useRef(null)
@@ -543,15 +578,18 @@ function Sidebar({ isOpen = true, onToggle }) {
 
   // Handlers de Drag & Drop
   const handleDragStartNode = useCallback((node, depth) => {
-    setDraggedNode({
+    const data = {
       id: node.id,
       path: node.path,
       name: node.name,
       depth
-    })
+    }
+    draggedNodeRef.current = data
+    setDraggedNode(data)
   }, [])
 
   const handleDragEndNode = useCallback(() => {
+    draggedNodeRef.current = null
     setDraggedNode(null)
     setDropTargetId(null)
   }, [])
@@ -564,10 +602,12 @@ function Sidebar({ isOpen = true, onToggle }) {
     setDropTargetId((prev) => (prev === targetId ? null : prev))
   }, [])
 
-  const handleMoveToRoot = useCallback(async () => {
-    if (!draggedNode?.path) return
-    const movingName = draggedNode.name
-    const sourcePath = draggedNode.path
+  const handleMoveToRoot = useCallback(async (forcedSource = null) => {
+    const source = forcedSource || draggedNodeRef.current || draggedNode
+    if (!source?.path) return
+    const movingName = source.name
+    const sourcePath = source.path
+    draggedNodeRef.current = null
     setDraggedNode(null)
     setDropTargetId(null)
 
@@ -582,32 +622,37 @@ function Sidebar({ isOpen = true, onToggle }) {
   }, [draggedNode, moveAlbumFolder, showSidebarNotice])
 
   const handleDropOnNode = useCallback(
-    async (targetNode) => {
-      if (!draggedNode?.path || !targetNode) {
-        setDraggedNode(null)
-        setDropTargetId(null)
-        return
+    async (targetNode, dataTransfer) => {
+      let source = draggedNodeRef.current || draggedNode
+      if (!source && dataTransfer) {
+        try {
+          const json = dataTransfer.getData('application/json')
+          if (json) source = JSON.parse(json)
+          if (!source) {
+            const raw = dataTransfer.getData('text/plain')
+            if (raw) source = { path: raw, name: raw.split(/[\\/]/).pop() }
+          }
+        } catch (_) {}
       }
+
+      draggedNodeRef.current = null
+      setDraggedNode(null)
+      setDropTargetId(null)
+
+      if (!source?.path || !targetNode) return
 
       // Soltar sobre "Todos" saca el álbum a la raíz
       if (targetNode.isAllTracks) {
-        await handleMoveToRoot()
+        await handleMoveToRoot(source)
         return
       }
 
-      if (!canDropIntoNode(draggedNode, targetNode)) {
-        setDraggedNode(null)
-        setDropTargetId(null)
-        return
-      }
+      if (!canDropIntoNode(source, targetNode)) return
 
-      const movingName = draggedNode.name
-      const sourcePath = draggedNode.path
+      const movingName = source.name
+      const sourcePath = source.path
       const targetPath = targetNode.path
       const targetName = targetNode.name
-
-      setDraggedNode(null)
-      setDropTargetId(null)
 
       const res = await moveAlbumFolder(sourcePath, targetPath)
       if (res && res.success) {
@@ -780,13 +825,13 @@ function Sidebar({ isOpen = true, onToggle }) {
       </div>
 
       <div
-        className={`album-list ${dropTargetId === '__ROOT__' ? 'root-drag-active' : ''}`}
+        className={`album-list ${draggedNode ? 'is-dragging-active' : ''} ${dropTargetId === '__ROOT__' ? 'root-drag-active' : ''}`}
         onDragOver={(e) => {
-          if (!draggedNode) return
+          if (!draggedNodeRef.current && !draggedNode) return
           if (e.target === e.currentTarget) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'move'
-            setDropTargetId('__ROOT__')
+            if (dropTargetId !== '__ROOT__') setDropTargetId('__ROOT__')
           }
         }}
         onDragLeave={(e) => {
@@ -795,7 +840,7 @@ function Sidebar({ isOpen = true, onToggle }) {
           }
         }}
         onDrop={(e) => {
-          if (!draggedNode) return
+          if (!draggedNodeRef.current && !draggedNode) return
           if (e.target === e.currentTarget) {
             e.preventDefault()
             handleMoveToRoot()
