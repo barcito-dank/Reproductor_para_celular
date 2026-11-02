@@ -50,7 +50,8 @@ const TreeNode = React.memo(function TreeNode({
   isSearching,
   dragState,
   onStartDrag,
-  onContextMenuNode
+  onContextMenuNode,
+  isDraggingOrJustFinished
 }) {
   const draggable = isNodeDraggable(node)
   const isBeingDragged = dragState?.node?.id === node.id
@@ -61,7 +62,7 @@ const TreeNode = React.memo(function TreeNode({
     if (draggable) {
       e.preventDefault()
       e.stopPropagation()
-      onContextMenuNode(node, { x: e.clientX, y: e.clientY })
+      onContextMenuNode(node, { x: e.clientX, y: e.clientY }, depth)
     }
   }
 
@@ -78,7 +79,11 @@ const TreeNode = React.memo(function TreeNode({
           data-is-all-tracks="false"
           className={`folder-header-bar ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
           onContextMenu={handleContextMenu}
-          onClick={() => onToggleFolder(node.id)}
+          onPointerDown={(e) => draggable && onStartDrag(e, node, depth, false)}
+          onClick={() => {
+            if (isDraggingOrJustFinished?.()) return
+            onToggleFolder(node.id)
+          }}
           title={`Carpeta: ${node.name} (${node.itemCount} elementos, ${node.totalTracks} canciones)`}
         >
           <div className="folder-header-left">
@@ -103,7 +108,7 @@ const TreeNode = React.memo(function TreeNode({
           {draggable && (
             <div
               className={`node-drag-edge ${isBeingDragged ? 'active-dragging' : ''}`}
-              onPointerDown={(e) => onStartDrag(e, node, depth)}
+              onPointerDown={(e) => onStartDrag(e, node, depth, true)}
               onClick={(e) => e.stopPropagation()}
               title="Mantén presionado y arrastra para mover carpeta"
             >
@@ -128,6 +133,7 @@ const TreeNode = React.memo(function TreeNode({
                 dragState={dragState}
                 onStartDrag={onStartDrag}
                 onContextMenuNode={onContextMenuNode}
+                isDraggingOrJustFinished={isDraggingOrJustFinished}
               />
             ))}
           </div>
@@ -147,7 +153,11 @@ const TreeNode = React.memo(function TreeNode({
       data-is-all-tracks={isAllTracks ? 'true' : 'false'}
       className={`album-item ${isSelected ? 'active' : ''} ${isAllTracks ? 'album-item-all-tracks' : ''} depth-${depth} ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
       onContextMenu={handleContextMenu}
-      onClick={() => onSelectAlbum(node)}
+      onPointerDown={(e) => draggable && onStartDrag(e, node, depth, false)}
+      onClick={() => {
+        if (isDraggingOrJustFinished?.()) return
+        onSelectAlbum(node)
+      }}
       title={isAllTracks ? 'Colección completa de todas las canciones' : `${node.name} (${node.trackCount} pistas)`}
     >
       {node.cover ? (
@@ -184,7 +194,7 @@ const TreeNode = React.memo(function TreeNode({
       {draggable && (
         <div
           className={`node-drag-edge ${isBeingDragged ? 'active-dragging' : ''}`}
-          onPointerDown={(e) => onStartDrag(e, node, depth)}
+          onPointerDown={(e) => onStartDrag(e, node, depth, true)}
           onClick={(e) => e.stopPropagation()}
           title="Mantén presionado y arrastra para mover el álbum"
         >
@@ -198,7 +208,16 @@ const TreeNode = React.memo(function TreeNode({
 /**
  * Menú contextual al hacer clic derecho en un álbum o carpeta
  */
-function AlbumContextMenu({ node, position, onClose, onRename, onDelete }) {
+function AlbumContextMenu({
+  node,
+  position,
+  depth = 0,
+  onClose,
+  onRename,
+  onDelete,
+  onOpenMove,
+  onMoveToRoot
+}) {
   const menuRef = useRef(null)
 
   useEffect(() => {
@@ -218,8 +237,9 @@ function AlbumContextMenu({ node, position, onClose, onRename, onDelete }) {
     }
   }, [onClose])
 
-  const menuWidth = 195
-  const menuHeight = 110
+  const menuWidth = 205
+  const isInsideFolder = depth > 0
+  const menuHeight = isInsideFolder ? 180 : 145
   const winW = typeof window !== 'undefined' ? window.innerWidth : 1200
   const winH = typeof window !== 'undefined' ? window.innerHeight : 800
 
@@ -243,6 +263,32 @@ function AlbumContextMenu({ node, position, onClose, onRename, onDelete }) {
       <div className="album-context-header">
         <span className="album-context-title" title={node.name}>{node.name}</span>
       </div>
+
+      <button
+        type="button"
+        className="album-context-item"
+        onClick={() => {
+          onClose()
+          onOpenMove(node, depth)
+        }}
+      >
+        <span className="album-context-icon">📁</span>
+        <span>Mover a...</span>
+      </button>
+
+      {isInsideFolder && (
+        <button
+          type="button"
+          className="album-context-item"
+          onClick={() => {
+            onClose()
+            onMoveToRoot(node)
+          }}
+        >
+          <span className="album-context-icon">⬆️</span>
+          <span>Sacar a nivel raíz</span>
+        </button>
+      )}
 
       <button
         type="button"
@@ -410,6 +456,183 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
   return typeof document !== 'undefined' ? createPortal(content, document.body) : null
 }
 
+/**
+ * Modal para mover álbum o carpeta a otro destino sin arrastrar
+ */
+function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving }) {
+  const [selectedDestination, setSelectedDestination] = useState(null)
+  const [searchFilter, setSearchFilter] = useState('')
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !isMoving) onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose, isMoving])
+
+  // Destinos válidos (raíz si depth > 0, más álbumes/carpetas elegibles)
+  const availableDestinations = useMemo(() => {
+    const targets = []
+    if (depth > 0) {
+      targets.push({
+        id: '__ROOT__',
+        path: '__ROOT__',
+        name: 'Nivel principal (raíz)',
+        type: 'root',
+        depth: 0
+      })
+    }
+
+    function traverse(nodes, d = 0) {
+      if (!nodes || !Array.isArray(nodes)) return
+      for (const item of nodes) {
+        if (canDropIntoNode(node, item)) {
+          targets.push({
+            id: item.id,
+            path: item.path,
+            name: item.name,
+            type: item.type,
+            cover: item.cover,
+            depth: d
+          })
+        }
+        if (item.children && Array.isArray(item.children)) {
+          traverse(item.children, d + 1)
+        }
+      }
+    }
+
+    traverse(library, 0)
+    return targets
+  }, [library, node, depth])
+
+  const filtered = useMemo(() => {
+    const q = searchFilter.trim().toLowerCase()
+    if (!q) return availableDestinations
+    return availableDestinations.filter(
+      (d) => d.id === '__ROOT__' || d.name.toLowerCase().includes(q)
+    )
+  }, [availableDestinations, searchFilter])
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    if (!selectedDestination || isMoving) return
+    onConfirm(node, selectedDestination)
+  }
+
+  const content = (
+    <div className="track-modal-backdrop" onClick={() => !isMoving && onClose()}>
+      <div className="track-modal-card album-move-card" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="track-modal-header">
+          <div className="track-modal-title-group">
+            <div className="track-modal-cover-placeholder">📁</div>
+            <div>
+              <h3>Mover álbum o carpeta</h3>
+              <p className="track-modal-subtitle">Destino para "{node.name}"</p>
+            </div>
+          </div>
+          <button type="button" className="track-modal-close" onClick={onClose} disabled={isMoving}>
+            ✕
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div className="track-modal-body" style={{ maxHeight: '340px', overflowY: 'auto' }}>
+            {availableDestinations.length > 5 && (
+              <input
+                ref={inputRef}
+                type="text"
+                className="create-album-input"
+                style={{ marginBottom: '10px' }}
+                placeholder="Filtrar destinos..."
+                value={searchFilter}
+                onChange={(e) => setSearchFilter(e.target.value)}
+                disabled={isMoving}
+              />
+            )}
+
+            {filtered.length === 0 ? (
+              <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
+                No hay otras carpetas o álbumes válidos disponibles para mover este elemento.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {filtered.map((dest) => {
+                  const isSelected = selectedDestination?.path === dest.path
+                  return (
+                    <div
+                      key={dest.id}
+                      onClick={() => setSelectedDestination(dest)}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '10px',
+                        paddingLeft: `${12 + dest.depth * 14}px`,
+                        background: isSelected ? 'rgba(124, 92, 252, 0.22)' : 'var(--bg-tertiary, rgba(255,255,255,0.03))',
+                        border: isSelected ? '1px solid var(--accent)' : '1px solid transparent',
+                        transition: 'all 0.12s ease'
+                      }}
+                    >
+                      <span style={{ fontSize: '16px' }}>
+                        {dest.type === 'root' ? '🏠' : dest.type === 'folder' ? '📁' : '💿'}
+                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                        <span style={{
+                          fontSize: '13px',
+                          fontWeight: isSelected ? '700' : '500',
+                          color: isSelected ? 'var(--accent)' : 'var(--text-primary)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis'
+                        }}>
+                          {dest.name}
+                        </span>
+                        {dest.type === 'root' && (
+                          <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                            Sacar fuera de subcarpetas al nivel superior
+                          </span>
+                        )}
+                      </div>
+                      {isSelected && (
+                        <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 'bold' }}>✓</span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="track-modal-footer">
+            <button
+              type="button"
+              className="track-modal-btn secondary"
+              onClick={onClose}
+              disabled={isMoving}
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              className="track-modal-btn primary"
+              disabled={!selectedDestination || isMoving}
+            >
+              {isMoving ? 'Moviendo...' : 'Mover aquí'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+
+  return typeof document !== 'undefined' ? createPortal(content, document.body) : null
+}
+
 function Sidebar({ isOpen = true, onToggle }) {
   const {
     library,
@@ -431,8 +654,10 @@ function Sidebar({ isOpen = true, onToggle }) {
   const createInputRef = useRef(null)
 
   // Estado para Drag & Drop basado en Pointer Events (100% fiable y fluido)
-  const [dragState, setDragState] = useState(null) // { node, depth, x, y, targetId, targetName }
+  const [dragState, setDragState] = useState(null) // { node, depth, x, y, targetId, targetName, targetPath }
   const dragStateRef = useRef(null)
+  const isDraggingOrJustFinishedRef = useRef(false)
+  const isDraggingOrJustFinished = useCallback(() => isDraggingOrJustFinishedRef.current, [])
   const [sidebarNotice, setSidebarNotice] = useState(null)
   const noticeTimerRef = useRef(null)
 
@@ -446,8 +671,10 @@ function Sidebar({ isOpen = true, onToggle }) {
     }
   }, [Boolean(dragState)])
 
-  // Estados para Clic Derecho en Álbum (Menú Contextual, Renombrar, Eliminar)
-  const [albumContextMenu, setAlbumContextMenu] = useState(null) // { node, position }
+  // Estados para Clic Derecho en Álbum (Menú Contextual, Mover, Renombrar, Eliminar)
+  const [albumContextMenu, setAlbumContextMenu] = useState(null) // { node, position, depth }
+  const [moveTargetNode, setMoveTargetNode] = useState(null) // { node, depth }
+  const [isMovingAlbum, setIsMovingAlbum] = useState(false)
   const [renameTargetNode, setRenameTargetNode] = useState(null)
   const [isRenamingAlbum, setIsRenamingAlbum] = useState(false)
   const [deleteTargetNode, setDeleteTargetNode] = useState(null)
@@ -518,23 +745,60 @@ function Sidebar({ isOpen = true, onToggle }) {
     }
   }, [moveAlbumFolder, showSidebarNotice])
 
-  // Iniciar Drag & Drop al presionar el borde derecho
-  const handleStartDrag = useCallback((e, node, depth) => {
+  // Confirmar movimiento mediante modal selector
+  const handleConfirmMoveModal = useCallback(async (nodeToMove, dest) => {
+    setIsMovingAlbum(true)
+    try {
+      if (dest.id === '__ROOT__' || dest.path === '__ROOT__') {
+        await handleMoveToRoot(nodeToMove)
+        setMoveTargetNode(null)
+      } else if (dest.path) {
+        const res = await moveAlbumFolder(nodeToMove.path, dest.path)
+        if (res && res.success) {
+          setExpandedFolders((prev) => ({
+            ...prev,
+            [dest.path]: true
+          }))
+          if (!res.unchanged) {
+            showSidebarNotice(`📂 "${nodeToMove.name}" movido dentro de "${dest.name}"`)
+          }
+          setMoveTargetNode(null)
+        } else if (res?.error) {
+          showSidebarNotice(`⚠ ${res.error}`)
+        }
+      }
+    } finally {
+      setIsMovingAlbum(false)
+    }
+  }, [handleMoveToRoot, moveAlbumFolder, showSidebarNotice])
+
+  // Iniciar Drag & Drop: desde el tirador (.node-drag-edge) o presionando y arrastrando la fila
+  const handleStartDrag = useCallback((e, node, depth, fromHandle = false) => {
     if (e.button !== 0) return // Solo botón izquierdo
-    e.preventDefault()
-    e.stopPropagation()
+    if (!isNodeDraggable(node)) return
+
+    if (fromHandle) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
 
     const startX = e.clientX
     const startY = e.clientY
     let hasStarted = false
+    let hoverExpandTimer = null
+    let lastHoveredFolderId = null
+    const threshold = fromHandle ? 3 : 6
 
     const handlePointerMove = (moveEvt) => {
       const dist = Math.hypot(moveEvt.clientX - startX, moveEvt.clientY - startY)
-      if (!hasStarted && dist > 3) {
+      if (!hasStarted && dist > threshold) {
         hasStarted = true
+        isDraggingOrJustFinishedRef.current = true
       }
 
       if (hasStarted) {
+        moveEvt.preventDefault()
+
         // Encontrar elemento bajo el cursor
         const el = document.elementFromPoint(moveEvt.clientX, moveEvt.clientY)
         const rootZone = el?.closest('.root-drop-zone')
@@ -542,10 +806,12 @@ function Sidebar({ isOpen = true, onToggle }) {
 
         let targetId = null
         let targetName = null
+        let targetPath = null
 
         if (rootZone) {
           targetId = '__ROOT__'
           targetName = 'Nivel principal'
+          targetPath = '__ROOT__'
         } else if (albumRow) {
           const aId = albumRow.getAttribute('data-album-id')
           const aName = albumRow.getAttribute('data-album-name')
@@ -555,10 +821,26 @@ function Sidebar({ isOpen = true, onToggle }) {
           if (aIsAll) {
             targetId = '__ROOT__'
             targetName = 'Nivel principal'
+            targetPath = '__ROOT__'
           } else if (aPath && canDropIntoNode(node, { path: aPath, isAllTracks: false })) {
             targetId = aId
             targetName = aName
+            targetPath = aPath
           }
+        }
+
+        // Auto-desplegar carpeta al mantener cursor encima durante el arrastre
+        if (targetId && targetId !== '__ROOT__' && albumRow?.classList.contains('folder-header-bar')) {
+          if (lastHoveredFolderId !== targetId) {
+            clearTimeout(hoverExpandTimer)
+            lastHoveredFolderId = targetId
+            hoverExpandTimer = setTimeout(() => {
+              setExpandedFolders((prev) => ({ ...prev, [targetId]: true }))
+            }, 550)
+          }
+        } else {
+          clearTimeout(hoverExpandTimer)
+          lastHoveredFolderId = null
         }
 
         const stateObj = {
@@ -579,12 +861,21 @@ function Sidebar({ isOpen = true, onToggle }) {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
       window.removeEventListener('pointercancel', handlePointerUp)
+      clearTimeout(hoverExpandTimer)
 
       const active = dragStateRef.current
       dragStateRef.current = null
       setDragState(null)
 
-      if (!hasStarted || !active) return
+      if (!hasStarted || !active) {
+        isDraggingOrJustFinishedRef.current = false
+        return
+      }
+
+      // Si hubo arrastre real, evitar que el evento click posterior dispare la selección de álbum
+      setTimeout(() => {
+        isDraggingOrJustFinishedRef.current = false
+      }, 150)
 
       let finalTargetId = active.targetId
       let finalTargetPath = active.targetPath
@@ -597,10 +888,14 @@ function Sidebar({ isOpen = true, onToggle }) {
 
         if (rootZone) {
           finalTargetId = '__ROOT__'
+          finalTargetPath = '__ROOT__'
+          finalTargetName = 'Nivel principal'
         } else if (albumRow) {
           const aIsAll = albumRow.getAttribute('data-is-all-tracks') === 'true'
           if (aIsAll) {
             finalTargetId = '__ROOT__'
+            finalTargetPath = '__ROOT__'
+            finalTargetName = 'Nivel principal'
           } else {
             const aPath = albumRow.getAttribute('data-album-path')
             if (aPath && canDropIntoNode(node, { path: aPath, isAllTracks: false })) {
@@ -612,7 +907,7 @@ function Sidebar({ isOpen = true, onToggle }) {
         }
       }
 
-      if (finalTargetId === '__ROOT__') {
+      if (finalTargetId === '__ROOT__' || finalTargetPath === '__ROOT__') {
         await handleMoveToRoot(node)
       } else if (finalTargetPath && canDropIntoNode(node, { path: finalTargetPath, isAllTracks: false })) {
         const res = await moveAlbumFolder(node.path, finalTargetPath)
@@ -636,8 +931,8 @@ function Sidebar({ isOpen = true, onToggle }) {
   }, [moveAlbumFolder, handleMoveToRoot, showSidebarNotice])
 
   // Clic derecho en un nodo de álbum o carpeta
-  const handleContextMenuNode = useCallback((node, position) => {
-    setAlbumContextMenu({ node, position })
+  const handleContextMenuNode = useCallback((node, position, depth = 0) => {
+    setAlbumContextMenu({ node, position, depth })
   }, [])
 
   // Confirmar renombrar álbum
@@ -903,6 +1198,7 @@ function Sidebar({ isOpen = true, onToggle }) {
             dragState={dragState}
             onStartDrag={handleStartDrag}
             onContextMenuNode={handleContextMenuNode}
+            isDraggingOrJustFinished={isDraggingOrJustFinished}
           />
         ))}
       </div>
@@ -935,9 +1231,24 @@ function Sidebar({ isOpen = true, onToggle }) {
         <AlbumContextMenu
           node={albumContextMenu.node}
           position={albumContextMenu.position}
+          depth={albumContextMenu.depth || 0}
           onClose={() => setAlbumContextMenu(null)}
+          onOpenMove={(n, d) => setMoveTargetNode({ node: n, depth: d })}
+          onMoveToRoot={(n) => handleMoveToRoot(n)}
           onRename={(n) => setRenameTargetNode(n)}
           onDelete={(n) => setDeleteTargetNode(n)}
+        />
+      )}
+
+      {/* Modal para Mover Álbum o Carpeta (Alternativa sin arrastrar) */}
+      {moveTargetNode && (
+        <MoveAlbumModal
+          node={moveTargetNode.node}
+          depth={moveTargetNode.depth}
+          library={library}
+          onClose={() => setMoveTargetNode(null)}
+          onConfirm={handleConfirmMoveModal}
+          isMoving={isMovingAlbum}
         />
       )}
 

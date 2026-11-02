@@ -1325,6 +1325,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     deleteTrackFromDisk,
     createAlbum,
     moveAlbumFolder,
+    renameAlbumFolder,
+    deleteAlbumFolder,
     currentTrack,
     currentAlbum,
     playlist,
