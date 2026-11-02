@@ -1,8 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
-import { scanMusicDirectory } from './scanner'
+import { parseFile } from 'music-metadata'
+import { scanMusicDirectory, removeFromMetadataCache } from './scanner'
 import { registerHotkeys, unregisterHotkeys, HOTKEY_CONFIG } from './hotkeys'
 
 let mainWindow = null
@@ -667,6 +668,312 @@ ipcMain.handle('scan-music', async (_, selectedDirectory) => {
   } catch (err) {
     console.error('Error scanning music directory:', err)
     return []
+  }
+})
+
+ipcMain.on('show-item-in-folder', (_, filePath) => {
+  if (filePath && typeof filePath === 'string') {
+    try {
+      shell.showItemInFolder(path.normalize(filePath))
+    } catch (err) {
+      console.error('Error abriendo ubicación del archivo:', err.message)
+    }
+  }
+})
+
+ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums, selectedDirectory }) => {
+  if (!sourceTrackPath || !Array.isArray(targetAlbums) || targetAlbums.length === 0) {
+    return { success: false, error: 'Parámetros inválidos' }
+  }
+
+  try {
+    await fs.promises.access(sourceTrackPath)
+  } catch (_) {
+    return { success: false, error: 'No se encontró el archivo de audio original' }
+  }
+
+  const fileName = path.basename(sourceTrackPath)
+  const copiedAlbums = []
+
+  for (const album of targetAlbums) {
+    if (!album || !album.path) continue
+    try {
+      await fs.promises.mkdir(album.path, { recursive: true })
+      const destPath = path.join(album.path, fileName)
+      if (path.resolve(sourceTrackPath).toLowerCase() !== path.resolve(destPath).toLowerCase()) {
+        await fs.promises.copyFile(sourceTrackPath, destPath)
+        copiedAlbums.push({ id: album.id, name: album.name, destPath })
+      }
+    } catch (err) {
+      console.error(`Error copiando pista a ${album.path}:`, err.message)
+    }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return { success: true, copiedAlbums, library }
+})
+
+ipcMain.handle('delete-track-file', async (_, { filePath, selectedDirectory }) => {
+  if (!filePath || typeof filePath !== 'string') {
+    return { success: false, error: 'Ruta de archivo inválida' }
+  }
+
+  const normalizedPath = path.normalize(filePath)
+  try {
+    await fs.promises.access(normalizedPath)
+  } catch (_) {
+    return { success: false, error: 'El archivo ya no existe en el disco' }
+  }
+
+  try {
+    await shell.trashItem(normalizedPath)
+  } catch (_) {
+    try {
+      await fs.promises.unlink(normalizedPath)
+    } catch (unlinkErr) {
+      return { success: false, error: unlinkErr.message || 'No se pudo eliminar el archivo' }
+    }
+  }
+
+  removeFromMetadataCache(normalizedPath)
+  removeFromMetadataCache(filePath)
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return { success: true, library }
+})
+
+ipcMain.handle('get-track-properties', async (_, filePath) => {
+  if (!filePath || typeof filePath !== 'string') return null
+  try {
+    const normalizedPath = path.normalize(filePath)
+    const stats = await fs.promises.stat(normalizedPath)
+    let metaCommon = {}
+    let metaFormat = {}
+    try {
+      const parsed = await parseFile(normalizedPath, { skipCovers: true })
+      metaCommon = parsed.common || {}
+      metaFormat = parsed.format || {}
+    } catch (_) {}
+
+    return {
+      fileName: path.basename(normalizedPath),
+      directory: path.dirname(normalizedPath),
+      path: normalizedPath,
+      extension: path.extname(normalizedPath).replace('.', '').toUpperCase(),
+      size: stats.size,
+      createdAt: stats.birthtimeMs,
+      modifiedAt: stats.mtimeMs,
+      title: metaCommon.title || path.parse(normalizedPath).name,
+      artist: metaCommon.artist || 'Artista Desconocido',
+      album: metaCommon.album || null,
+      year: metaCommon.year || null,
+      genre: Array.isArray(metaCommon.genre) && metaCommon.genre.length > 0 ? metaCommon.genre.join(', ') : null,
+      duration: metaFormat.duration || 0,
+      bitrate: metaFormat.bitrate ? Math.round(metaFormat.bitrate / 1000) : null,
+      sampleRate: metaFormat.sampleRate || null,
+      numberOfChannels: metaFormat.numberOfChannels || null,
+      bitsPerSample: metaFormat.bitsPerSample || null,
+      codec: metaFormat.codec || metaFormat.container || path.extname(normalizedPath).replace('.', '').toUpperCase()
+    }
+  } catch (err) {
+    console.error('Error obteniendo propiedades de pista:', err.message)
+    return null
+  }
+})
+
+ipcMain.handle('create-album', async (_, { albumName, parentDir, selectedDirectory }) => {
+  if (!albumName || typeof albumName !== 'string') {
+    return { success: false, error: 'Nombre de álbum inválido' }
+  }
+
+  const sanitized = albumName
+    .replace(/[<>:"/\\|?*]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!sanitized || sanitized.startsWith('.')) {
+    return { success: false, error: 'Ingresa un nombre válido para el álbum' }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const baseTarget = parentDir && typeof parentDir === 'string' ? parentDir : musicDir
+  const newAlbumPath = path.join(baseTarget, sanitized)
+
+  try {
+    await fs.promises.access(newAlbumPath)
+    return { success: false, error: 'Ya existe un álbum con ese nombre' }
+  } catch (_) {}
+
+  try {
+    await fs.promises.mkdir(newAlbumPath, { recursive: true })
+  } catch (err) {
+    return { success: false, error: err.message || 'No se pudo crear la carpeta del álbum' }
+  }
+
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return {
+    success: true,
+    albumId: newAlbumPath,
+    albumPath: newAlbumPath,
+    albumName: sanitized,
+    library
+  }
+})
+
+ipcMain.handle('move-album-folder', async (_, { sourcePath, targetParentDir, selectedDirectory }) => {
+  if (!sourcePath || typeof sourcePath !== 'string') {
+    return { success: false, error: 'Ruta de origen inválida' }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const destParent =
+    !targetParentDir || targetParentDir === '__ROOT__'
+      ? musicDir
+      : targetParentDir
+
+  const resolvedSource = path.resolve(sourcePath)
+  const resolvedDestParent = path.resolve(destParent)
+  const folderName = path.basename(resolvedSource)
+  const resolvedDest = path.join(resolvedDestParent, folderName)
+
+  if (resolvedSource.toLowerCase() === resolvedDestParent.toLowerCase()) {
+    return { success: false, error: 'No se puede mover un álbum dentro de sí mismo' }
+  }
+
+  if (
+    resolvedDestParent.toLowerCase().startsWith(resolvedSource.toLowerCase() + path.sep)
+  ) {
+    return { success: false, error: 'No se puede mover una carpeta dentro de una subcarpeta propia' }
+  }
+
+  if (resolvedSource.toLowerCase() === resolvedDest.toLowerCase()) {
+    return { success: false, error: 'El álbum ya se encuentra en esa ubicación' }
+  }
+
+  try {
+    await fs.promises.access(resolvedDest)
+    return { success: false, error: `Ya existe "${folderName}" en el destino` }
+  } catch (_) {}
+
+  try {
+    await fs.promises.mkdir(resolvedDestParent, { recursive: true })
+    try {
+      await fs.promises.rename(resolvedSource, resolvedDest)
+    } catch (renameErr) {
+      await fs.promises.cp(resolvedSource, resolvedDest, { recursive: true })
+      await fs.promises.rm(resolvedSource, { recursive: true, force: true })
+    }
+  } catch (err) {
+    console.error('Error moviendo carpeta de álbum:', err.message)
+    return { success: false, error: err.message || 'No se pudo mover el álbum' }
+  }
+
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return {
+    success: true,
+    oldPath: resolvedSource,
+    newPath: resolvedDest,
+    parentPath: resolvedDestParent,
+    library
+  }
+})
+
+ipcMain.handle('rename-album-folder', async (_, { albumPath, newName, selectedDirectory }) => {
+  if (!albumPath || typeof albumPath !== 'string') {
+    return { success: false, error: 'Ruta de álbum inválida' }
+  }
+
+  const sanitized = (newName || '').replace(/[\\/:*?"<>|]/g, '').trim()
+  if (!sanitized) {
+    return { success: false, error: 'El nombre del álbum no puede estar vacío ni contener caracteres especiales' }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const resolvedPath = path.resolve(albumPath)
+  const currentBaseName = path.basename(resolvedPath)
+
+  if (currentBaseName === sanitized) {
+    return { success: true, unchanged: true, oldPath: resolvedPath, newPath: resolvedPath, newName: sanitized }
+  }
+
+  const destPath = path.join(path.dirname(resolvedPath), sanitized)
+
+  if (destPath.toLowerCase() !== resolvedPath.toLowerCase()) {
+    try {
+      await fs.promises.access(destPath)
+      return { success: false, error: `Ya existe una carpeta llamada "${sanitized}"` }
+    } catch (_) {}
+  }
+
+  try {
+    try {
+      await fs.promises.rename(resolvedPath, destPath)
+    } catch (renameErr) {
+      await fs.promises.cp(resolvedPath, destPath, { recursive: true })
+      await fs.promises.rm(resolvedPath, { recursive: true, force: true })
+    }
+  } catch (err) {
+    console.error('Error renombrando álbum:', err.message)
+    return { success: false, error: err.message || 'No se pudo renombrar el álbum' }
+  }
+
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return {
+    success: true,
+    oldPath: resolvedPath,
+    newPath: destPath,
+    newName: sanitized,
+    library
+  }
+})
+
+ipcMain.handle('delete-album-folder', async (_, { albumPath, selectedDirectory }) => {
+  if (!albumPath || typeof albumPath !== 'string') {
+    return { success: false, error: 'Ruta de álbum inválida' }
+  }
+
+  const musicDir = path.resolve(selectedDirectory || await getMusicDirectory())
+  const resolvedPath = path.resolve(albumPath)
+
+  // Medida de seguridad esencial: no permitir borrar fuera de musicDir ni la carpeta raíz
+  if (resolvedPath.toLowerCase() === musicDir.toLowerCase()) {
+    return { success: false, error: 'No se puede eliminar la carpeta raíz de música' }
+  }
+
+  if (!resolvedPath.toLowerCase().startsWith(musicDir.toLowerCase() + path.sep)) {
+    return { success: false, error: 'La carpeta está fuera del directorio de música' }
+  }
+
+  try {
+    await fs.promises.access(resolvedPath)
+  } catch {
+    return { success: false, error: 'La carpeta no existe en disco' }
+  }
+
+  try {
+    try {
+      await shell.trashItem(resolvedPath)
+    } catch {
+      await fs.promises.rm(resolvedPath, { recursive: true, force: true })
+    }
+  } catch (err) {
+    console.error('Error eliminando álbum:', err.message)
+    return { success: false, error: err.message || 'No se pudo eliminar la carpeta' }
+  }
+
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return {
+    success: true,
+    deletedPath: resolvedPath,
+    library
   }
 })
 

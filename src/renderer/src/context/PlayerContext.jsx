@@ -89,6 +89,45 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   // allAlbums memoizado estrictamente basado en rawLibrary (se calcula una sola vez tras escanear)
   const allAlbums = useMemo(() => getAllAlbums(rawLibrary), [rawLibrary])
 
+  // Mapa canónico de pertenencia de canciones a álbumes (identifica copias iguales y en cuántos/cuáles álbumes están)
+  const songAlbumsMap = useMemo(() => {
+    const map = new Map()
+    if (!allAlbums || allAlbums.length === 0) return map
+
+    for (const album of allAlbums) {
+      if (!album.tracks) continue
+      for (const track of album.tracks) {
+        const uniqueKey = track.uniqueKey || getTrackUniqueKey(track)
+        let entry = map.get(uniqueKey)
+        if (!entry) {
+          entry = {
+            uniqueKey,
+            albumIdsSet: new Set(),
+            albumNamesSet: new Set(),
+            copies: []
+          }
+          map.set(uniqueKey, entry)
+        }
+        entry.albumIdsSet.add(album.id)
+        entry.albumNamesSet.add(album.name)
+        entry.copies.push({
+          albumId: album.id,
+          albumName: album.name,
+          albumPath: album.path,
+          track
+        })
+      }
+    }
+
+    for (const entry of map.values()) {
+      entry.albumIds = Array.from(entry.albumIdsSet)
+      entry.albumNames = Array.from(entry.albumNamesSet)
+      entry.albumCount = entry.albumIds.length
+    }
+
+    return map
+  }, [allAlbums])
+
   // Álbum virtual "Todos" con canciones únicas de todos los álbumes y carátula genérica propia
   const allTracksAlbum = useMemo(() => {
     if (!allAlbums || allAlbums.length === 0) return null
@@ -98,8 +137,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     for (const album of allAlbums) {
       if (!album.tracks) continue
       for (const track of album.tracks) {
-        const uniqueKey = getTrackUniqueKey(track)
+        const uniqueKey = track.uniqueKey || getTrackUniqueKey(track)
         const cover = track.cover || album.cover || null
+        const membership = songAlbumsMap.get(uniqueKey)
 
         if (!seenByKey.has(uniqueKey)) {
           seenByKey.set(uniqueKey, tracks.length)
@@ -107,7 +147,10 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
             ...track,
             uniqueKey,
             cover,
-            albumName: album.name
+            albumName: album.name,
+            albumIds: membership ? membership.albumIds : [album.id],
+            albumNames: membership ? membership.albumNames : [album.name],
+            albumCount: membership ? membership.albumCount : 1
           })
         } else {
           // Si la primera copia encontrada no tenía carátula y otra copia en otro álbum sí tiene, conservar la carátula
@@ -135,7 +178,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       trackCount: tracks.length,
       tracks
     }
-  }, [allAlbums])
+  }, [allAlbums, songAlbumsMap])
 
   // Biblioteca final incluyendo el álbum "Todos" al principio
   const library = useMemo(() => {
@@ -229,6 +272,26 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     setSelectedAlbum((prev) => {
       if (!prev) return allTracksAlbum || findFirstAlbum(library)
       if (prev.id === '__all_tracks__' && allTracksAlbum) return allTracksAlbum
+      return allAlbums.find((a) => a.id === prev.id) || allTracksAlbum || findFirstAlbum(library)
+    })
+
+    setCurrentAlbum((prev) => {
+      if (!prev) return prev
+      const updated =
+        prev.id === '__all_tracks__'
+          ? allTracksAlbum
+          : allAlbums.find((a) => a.id === prev.id)
+      if (updated && updated.tracks) {
+        setPlaylist(updated.tracks)
+        if (currentTrack) {
+          const nextIdx = updated.tracks.findIndex((t) => t.id === currentTrack.id)
+          if (nextIdx !== -1) {
+            setPlaylistIndex(nextIdx)
+            setCurrentTrack(updated.tracks[nextIdx])
+          }
+        }
+        return updated
+      }
       return prev
     })
   }, [isMiniPanel, library, allTracksAlbum, allAlbums])
@@ -872,11 +935,360 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     return unsubCommand
   }, [isMiniPanel, playlist, currentAlbum, playTrack, seekTo, setVolumeLevel, nextTrack, previousTrack, togglePlay, toggleShuffle, toggleLoop, volume])
 
+  // Obtener información completa de en cuántos y cuáles álbumes está una canción
+  const getTrackAlbumInfo = useCallback((track) => {
+    if (!track) {
+      return {
+        uniqueKey: '',
+        albumCount: 0,
+        albumIdsSet: new Set(),
+        albumIds: [],
+        albumNames: [],
+        copies: []
+      }
+    }
+    const uniqueKey = track.uniqueKey || getTrackUniqueKey(track)
+    const entry = songAlbumsMap.get(uniqueKey)
+    if (entry) return entry
+
+    const fallbackIds = Array.isArray(track.albumIds) ? track.albumIds : []
+    const fallbackNames = Array.isArray(track.albumNames) ? track.albumNames : []
+    return {
+      uniqueKey,
+      albumCount: fallbackIds.length || 1,
+      albumIdsSet: new Set(fallbackIds),
+      albumIds: fallbackIds,
+      albumNames: fallbackNames,
+      copies: []
+    }
+  }, [songAlbumsMap])
+
+  // Copiar/agregar una canción a uno o varios álbumes y actualizar biblioteca en vivo
+  const addTrackToAlbums = useCallback(async (track, targetAlbums) => {
+    if (!track?.path || !Array.isArray(targetAlbums) || targetAlbums.length === 0) {
+      return { success: false }
+    }
+    try {
+      const result = await window.electronAPI.addTrackToAlbums({
+        sourceTrackPath: track.path,
+        targetAlbums: targetAlbums.map((a) => ({
+          id: a.id,
+          name: a.name,
+          path: a.path
+        })),
+        selectedDirectory: musicDirectory || undefined
+      })
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+      }
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error agregando canción a álbumes:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory])
+
+  // Eliminar archivo de canción del disco (liberando antes el reproductor si estaba cargada)
+  const deleteTrackFromDisk = useCallback(async (track) => {
+    if (!track?.path) return { success: false }
+    try {
+      const audio = audioRef.current
+      if (currentTrack && (currentTrack.id === track.id || currentTrack.path === track.path)) {
+        const remaining = playlist.filter((t) => t.id !== track.id && t.path !== track.path)
+        audio.pause()
+        setIsPlaying(false)
+        audio.removeAttribute('src')
+        audio.load()
+        if (remaining.length > 0) {
+          const nextIdx = Math.min(Math.max(0, playlistIndex), remaining.length - 1)
+          const replacement = remaining[nextIdx]
+          setCurrentTrack(replacement)
+          setPlaylist(remaining)
+          setPlaylistIndex(nextIdx)
+          audio.src = resolveAudioSrc(replacement)
+        } else {
+          setCurrentTrack(null)
+          setPlaylist([])
+          setPlaylistIndex(-1)
+          setCurrentTime(0)
+          setDuration(0)
+        }
+      }
+
+      const result = await window.electronAPI.deleteTrackFile({
+        filePath: track.path,
+        selectedDirectory: musicDirectory || undefined
+      })
+
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+      }
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error eliminando archivo de canción:', err)
+      return { success: false, error: err.message }
+    }
+  }, [currentTrack, playlist, playlistIndex, musicDirectory])
+
+  // Crear un nuevo álbum (carpeta) en la biblioteca y seleccionarlo automáticamente
+  const createAlbum = useCallback(async (albumName, parentDir = null) => {
+    if (!albumName || !window.electronAPI?.createAlbum) return { success: false }
+    try {
+      const result = await window.electronAPI.createAlbum({
+        albumName,
+        parentDir,
+        selectedDirectory: musicDirectory || undefined
+      })
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+        const flat = getAllAlbums(result.library)
+        const created = flat.find((a) => a.id === result.albumId || a.path === result.albumPath)
+        if (created) {
+          setSelectedAlbum(created)
+        }
+      }
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error creando álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory])
+
+  // Mover un álbum o carpeta dentro o fuera de otro álbum/carpeta mediante Drag & Drop
+  const moveAlbumFolder = useCallback(async (sourcePath, targetParentDir = '__ROOT__') => {
+    if (!sourcePath || !window.electronAPI?.moveAlbumFolder) return { success: false }
+    const audio = audioRef.current
+    const normSource = sourcePath.replace(/\//g, '\\').toLowerCase()
+    const currentTrackPathNorm = currentTrack?.path
+      ? currentTrack.path.replace(/\//g, '\\').toLowerCase()
+      : ''
+
+    const trackInsideMovedFolder =
+      currentTrackPathNorm &&
+      (currentTrackPathNorm === normSource || currentTrackPathNorm.startsWith(normSource + '\\'))
+
+    let savedResumeTime = 0
+    let wasPlayingBeforeMove = false
+    let relativeSubPath = ''
+
+    if (trackInsideMovedFolder && audio) {
+      savedResumeTime = audio.currentTime || 0
+      wasPlayingBeforeMove = !audio.paused
+      relativeSubPath = currentTrack.path.slice(sourcePath.length)
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+
+    try {
+      const result = await window.electronAPI.moveAlbumFolder({
+        sourcePath,
+        targetParentDir,
+        selectedDirectory: musicDirectory || undefined
+      })
+
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+        const flat = getAllAlbums(result.library)
+
+        if (selectedAlbum && selectedAlbum.path) {
+          const selNorm = selectedAlbum.path.replace(/\//g, '\\').toLowerCase()
+          if (selNorm === normSource || selNorm.startsWith(normSource + '\\')) {
+            const sub = selectedAlbum.path.slice(sourcePath.length)
+            const nextAlbumPath = result.newPath + sub
+            const movedAlbum = flat.find((a) => a.path === nextAlbumPath || a.id === nextAlbumPath)
+            if (movedAlbum) setSelectedAlbum(movedAlbum)
+          }
+        }
+
+        if (trackInsideMovedFolder && result.newPath && audio) {
+          const nextTrackPath = result.newPath + relativeSubPath
+          let foundTrack = null
+          let foundAlbum = null
+          for (const alb of flat) {
+            const match = alb.tracks?.find((t) => t.path === nextTrackPath)
+            if (match) {
+              foundTrack = match
+              foundAlbum = alb
+              break
+            }
+          }
+          if (foundTrack) {
+            setCurrentTrack(foundTrack)
+            if (foundAlbum) {
+              setCurrentAlbum(foundAlbum)
+              setPlaylist(foundAlbum.tracks)
+            }
+            pendingRestoreSeekRef.current = savedResumeTime
+            audio.src = resolveAudioSrc(foundTrack)
+            if (wasPlayingBeforeMove) {
+              audio.play().then(() => setIsPlaying(true)).catch(() => {})
+            }
+          }
+        }
+      } else if (trackInsideMovedFolder && currentTrack && audio) {
+        // Si falló o se canceló el movimiento, restaurar el src original
+        pendingRestoreSeekRef.current = savedResumeTime
+        audio.src = resolveAudioSrc(currentTrack)
+        if (wasPlayingBeforeMove) {
+          audio.play().then(() => setIsPlaying(true)).catch(() => {})
+        }
+      }
+
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error moviendo álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory, currentTrack, selectedAlbum])
+
+  // Renombrar una carpeta de álbum
+  const renameAlbumFolder = useCallback(async (albumPath, newName) => {
+    if (!albumPath || !newName || !window.electronAPI?.renameAlbumFolder) return { success: false }
+    const audio = audioRef.current
+    const normSource = albumPath.replace(/\//g, '\\').toLowerCase()
+    const currentTrackPathNorm = currentTrack?.path
+      ? currentTrack.path.replace(/\//g, '\\').toLowerCase()
+      : ''
+
+    const trackInsideFolder =
+      currentTrackPathNorm &&
+      (currentTrackPathNorm === normSource || currentTrackPathNorm.startsWith(normSource + '\\'))
+
+    let savedResumeTime = 0
+    let wasPlayingBefore = false
+    let relativeSubPath = ''
+
+    if (trackInsideFolder && audio) {
+      savedResumeTime = audio.currentTime || 0
+      wasPlayingBefore = !audio.paused
+      relativeSubPath = currentTrack.path.slice(albumPath.length)
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+
+    try {
+      const result = await window.electronAPI.renameAlbumFolder({
+        albumPath,
+        newName,
+        selectedDirectory: musicDirectory || undefined
+      })
+
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+        const flat = getAllAlbums(result.library)
+
+        if (selectedAlbum && selectedAlbum.path) {
+          const selNorm = selectedAlbum.path.replace(/\//g, '\\').toLowerCase()
+          if (selNorm === normSource || selNorm.startsWith(normSource + '\\')) {
+            const sub = selectedAlbum.path.slice(albumPath.length)
+            const nextAlbumPath = (result.newPath || albumPath) + sub
+            const updatedAlbum = flat.find((a) => a.path === nextAlbumPath || a.id === nextAlbumPath)
+            if (updatedAlbum) setSelectedAlbum(updatedAlbum)
+          }
+        }
+
+        if (trackInsideFolder && result.newPath && audio) {
+          const nextTrackPath = result.newPath + relativeSubPath
+          let foundTrack = null
+          let foundAlbum = null
+          for (const alb of flat) {
+            const match = alb.tracks?.find((t) => t.path === nextTrackPath)
+            if (match) {
+              foundTrack = match
+              foundAlbum = alb
+              break
+            }
+          }
+          if (foundTrack) {
+            setCurrentTrack(foundTrack)
+            if (foundAlbum) {
+              setCurrentAlbum(foundAlbum)
+              setPlaylist(foundAlbum.tracks)
+            }
+            pendingRestoreSeekRef.current = savedResumeTime
+            audio.src = resolveAudioSrc(foundTrack)
+            if (wasPlayingBefore) {
+              audio.play().then(() => setIsPlaying(true)).catch(() => {})
+            }
+          }
+        }
+      } else if (trackInsideFolder && currentTrack && audio) {
+        pendingRestoreSeekRef.current = savedResumeTime
+        audio.src = resolveAudioSrc(currentTrack)
+        if (wasPlayingBefore) {
+          audio.play().then(() => setIsPlaying(true)).catch(() => {})
+        }
+      }
+
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error renombrando álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory, currentTrack, selectedAlbum])
+
+  // Eliminar una carpeta de álbum
+  const deleteAlbumFolder = useCallback(async (albumPath) => {
+    if (!albumPath || !window.electronAPI?.deleteAlbumFolder) return { success: false }
+    const audio = audioRef.current
+    const normSource = albumPath.replace(/\//g, '\\').toLowerCase()
+    const currentTrackPathNorm = currentTrack?.path
+      ? currentTrack.path.replace(/\//g, '\\').toLowerCase()
+      : ''
+
+    const trackInsideFolder =
+      currentTrackPathNorm &&
+      (currentTrackPathNorm === normSource || currentTrackPathNorm.startsWith(normSource + '\\'))
+
+    if (trackInsideFolder && audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+      setCurrentTrack(null)
+      setCurrentAlbum(null)
+      setPlaylist([])
+      setIsPlaying(false)
+    }
+
+    try {
+      const result = await window.electronAPI.deleteAlbumFolder({
+        albumPath,
+        selectedDirectory: musicDirectory || undefined
+      })
+
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+
+        if (selectedAlbum && selectedAlbum.path) {
+          const selNorm = selectedAlbum.path.replace(/\//g, '\\').toLowerCase()
+          if (selNorm === normSource || selNorm.startsWith(normSource + '\\')) {
+            setSelectedAlbum(null)
+          }
+        }
+      }
+
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error eliminando álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory, currentTrack, selectedAlbum])
+
   // Contexto principal memoizado: solo cambia cuando cambian datos reales de pista, biblioteca o controles
   // currentTime NO está en estas dependencias, por lo que AlbumView, Sidebar, etc. no se re-renderizan
   const playerValue = useMemo(() => ({
     library,
     allAlbums,
+    songAlbumsMap,
+    getTrackAlbumInfo,
+    addTrackToAlbums,
+    deleteTrackFromDisk,
+    createAlbum,
+    moveAlbumFolder,
+    renameAlbumFolder,
+    deleteAlbumFolder,
     currentTrack,
     currentAlbum,
     playlist,
@@ -907,6 +1319,12 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   }), [
     library,
     allAlbums,
+    songAlbumsMap,
+    getTrackAlbumInfo,
+    addTrackToAlbums,
+    deleteTrackFromDisk,
+    createAlbum,
+    moveAlbumFolder,
     currentTrack,
     currentAlbum,
     playlist,

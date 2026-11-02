@@ -19,6 +19,8 @@ _archivado/
 logs/
 *.tmp
 *.bak
+.*.json
+*.cache.json
 
 # Entornos y editores
 .idea/

@@ -28,6 +28,49 @@ function getLegacyCachePath(baseDir) {
   return path.join(baseDir, '.library_cache.json')
 }
 
+function getSongAlbumsIndexPath(baseDir, userDataDir) {
+  if (userDataDir) {
+    return path.join(userDataDir, 'cache', `song_albums_${getDirHash(baseDir)}.json`)
+  }
+  return path.join(baseDir, '.song_albums_index.json')
+}
+
+/**
+ * Genera una clave canónica de identidad para detectar canciones iguales
+ * en múltiples álbumes dentro del directorio de música.
+ */
+function computeTrackUniqueKey(track) {
+  if (!track) return ''
+
+  const normTitle = (track.title || '')
+    .toLowerCase()
+    .replace(/(?:\s*-\s*(?:copia|copy)|\s*\(\d+\))+$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const normArtist = (track.artist || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const roundedDuration = Math.round(track.duration || 0)
+
+  if (normTitle) {
+    return `${normTitle}|${normArtist}|${roundedDuration}`
+  }
+
+  const rawPath = track.path || track.id || ''
+  const fileName = rawPath.split(/[\\/]/).pop() || rawPath
+  const stem = fileName
+    .replace(/\.[^/.]+$/, '')
+    .toLowerCase()
+    .replace(/(?:\s*-\s*(?:copia|copy)|\s*\(\d+\))+$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return `${stem}|${normArtist}|${roundedDuration}`
+}
+
 function toFileUrl(filePath) {
   if (!filePath) return null
   try {
@@ -179,6 +222,7 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
   try {
     const stats = await fs.promises.stat(filePath)
     const mtime = stats.mtimeMs
+    const size = stats.size
 
     if (metadataCache[filePath] && metadataCache[filePath].mtime === mtime) {
       const cached = metadataCache[filePath].data
@@ -196,7 +240,11 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
           }
         }
         if (coverValid) {
-          return cached
+          return {
+            ...cached,
+            size: cached.size ?? size,
+            mtime
+          }
         }
       }
     }
@@ -216,6 +264,11 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       album: common.album || null,
       trackNumber: common.track?.no || 0,
       duration: format.duration || 0,
+      bitrate: format.bitrate ? Math.round(format.bitrate / 1000) : null,
+      sampleRate: format.sampleRate || null,
+      codec: format.codec || format.container || path.extname(filePath).replace('.', '').toUpperCase(),
+      size,
+      mtime,
       embeddedCover: coverUrl
     }
 
@@ -229,6 +282,11 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       album: null,
       trackNumber: 0,
       duration: 0,
+      bitrate: null,
+      sampleRate: null,
+      codec: path.extname(filePath).replace('.', '').toUpperCase(),
+      size: 0,
+      mtime: 0,
       embeddedCover: null
     }
   }
@@ -302,8 +360,8 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
   }
 
   // Helper para procesar una lista de archivos de audio como un álbum
-  async function createAlbumFromFiles(albumId, albumName, albumPath, audioFiles, catPath, folderEntries) {
-    if (audioFiles.length === 0) return null
+  async function createAlbumFromFiles(albumId, albumName, albumPath, audioFiles, catPath, folderEntries, allowEmpty = false) {
+    if (audioFiles.length === 0 && !allowEmpty) return null
 
     const coverFilePath = await findCoverImage(albumPath, folderEntries)
     const albumCoverUrl = coverFilePath ? toFileUrl(coverFilePath) : null
@@ -312,7 +370,7 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
       audioFiles.map((audioFile) =>
         limitMetadata(async () => {
           const meta = await extractMetadata(audioFile, baseDir, userDataDir)
-          return {
+          const baseTrack = {
             id: audioFile,
             path: audioFile,
             fileUrl: toFileUrl(audioFile),
@@ -320,8 +378,18 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
             artist: meta.artist,
             trackNumber: meta.trackNumber,
             duration: meta.duration,
+            size: meta.size || 0,
+            mtime: meta.mtime || 0,
+            bitrate: meta.bitrate || null,
+            sampleRate: meta.sampleRate || null,
+            codec: meta.codec || path.extname(audioFile).replace('.', '').toUpperCase(),
+            albumId,
+            albumName,
+            albumPath,
             cover: meta.embeddedCover || albumCoverUrl
           }
+          baseTrack.uniqueKey = computeTrackUniqueKey(baseTrack)
+          return baseTrack
         })
       )
     )
@@ -352,9 +420,9 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
     }
   }
 
-  // Caso 1: Carpeta sin subdirectorios (Álbum clásico)
+  // Caso 1: Carpeta sin subdirectorios (Álbum clásico, incluyendo álbumes recién creados vacíos)
   if (subDirs.length === 0) {
-    return createAlbumFromFiles(dir, dirName, dir, directAudioFiles, parentPathName, entries)
+    return createAlbumFromFiles(dir, dirName, dir, directAudioFiles, parentPathName, entries, true)
   }
 
   // Caso 2: Carpeta con subdirectorios (Barra desplegable)
@@ -403,6 +471,105 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
     children: children,
     totalTracks: countTracksRecursive(children),
     itemCount: children.length
+  }
+}
+
+/**
+ * Recorre el árbol de álbumes para identificar canciones iguales en diferentes álbumes,
+ * anota en cada canción cuántos y cuáles álbumes la contienen, y persiste el modelo en disco.
+ */
+async function annotateAndSaveSongAlbumsModel(tree, baseDir, userDataDir) {
+  const albumNodes = []
+  function collectAlbums(nodes) {
+    if (!nodes || !Array.isArray(nodes)) return
+    for (const node of nodes) {
+      if (node.type === 'album') {
+        albumNodes.push(node)
+      }
+      if (node.children && Array.isArray(node.children)) {
+        collectAlbums(node.children)
+      }
+    }
+  }
+  collectAlbums(tree)
+
+  const songMap = new Map()
+
+  for (const album of albumNodes) {
+    if (!album.tracks) continue
+    for (const track of album.tracks) {
+      const key = track.uniqueKey || computeTrackUniqueKey(track)
+      track.uniqueKey = key
+      if (!songMap.has(key)) {
+        songMap.set(key, {
+          uniqueKey: key,
+          title: track.title,
+          artist: track.artist,
+          duration: track.duration,
+          albumIdsSet: new Set(),
+          albumNamesSet: new Set(),
+          copies: []
+        })
+      }
+      const entry = songMap.get(key)
+      entry.albumIdsSet.add(album.id)
+      entry.albumNamesSet.add(album.name)
+      entry.copies.push({
+        albumId: album.id,
+        albumName: album.name,
+        albumPath: album.path,
+        filePath: track.path
+      })
+    }
+  }
+
+  const persistedIndex = {}
+  for (const [key, entry] of songMap.entries()) {
+    const albumIds = Array.from(entry.albumIdsSet)
+    const albumNames = Array.from(entry.albumNamesSet)
+    entry.albumIds = albumIds
+    entry.albumNames = albumNames
+    entry.albumCount = albumIds.length
+    persistedIndex[key] = {
+      uniqueKey: key,
+      title: entry.title,
+      artist: entry.artist,
+      duration: entry.duration,
+      albumCount: entry.albumCount,
+      albumIds,
+      albumNames,
+      copies: entry.copies
+    }
+  }
+
+  for (const album of albumNodes) {
+    if (!album.tracks) continue
+    for (const track of album.tracks) {
+      const entry = songMap.get(track.uniqueKey)
+      if (entry) {
+        track.albumIds = entry.albumIds
+        track.albumNames = entry.albumNames
+        track.albumCount = entry.albumCount
+      } else {
+        track.albumIds = [album.id]
+        track.albumNames = [album.name]
+        track.albumCount = 1
+      }
+    }
+  }
+
+  const indexPath = getSongAlbumsIndexPath(baseDir, userDataDir)
+  try {
+    await fs.promises.mkdir(path.dirname(indexPath), { recursive: true })
+    await fs.promises.writeFile(indexPath, JSON.stringify(persistedIndex), 'utf8')
+  } catch (err) {
+    console.warn(`Aviso al guardar índice de álbumes por canción en ${indexPath}:`, err.message)
+  }
+}
+
+function removeFromMetadataCache(filePath) {
+  if (filePath && metadataCache[filePath]) {
+    delete metadataCache[filePath]
   }
 }
 
@@ -457,9 +624,10 @@ async function scanMusicDirectory(baseDir, userDataDir = null) {
   // Ordenar árbol alfabéticamente
   tree.sort((a, b) => a.name.localeCompare(b.name))
 
+  await annotateAndSaveSongAlbumsModel(tree, baseDir, userDataDir)
   await saveCache(baseDir, userDataDir)
 
   return tree
 }
 
-export { scanMusicDirectory }
+export { scanMusicDirectory, computeTrackUniqueKey, removeFromMetadataCache }

@@ -1,9 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Escaneo de biblioteca
+  // Escaneo y gestión de archivos de biblioteca
   scanMusic: (directory) => ipcRenderer.invoke('scan-music', directory),
   selectMusicDirectory: () => ipcRenderer.invoke('select-music-directory'),
+  showItemInFolder: (filePath) => ipcRenderer.send('show-item-in-folder', filePath),
+  addTrackToAlbums: (payload) => ipcRenderer.invoke('add-track-to-albums', payload),
+  deleteTrackFile: (payload) => ipcRenderer.invoke('delete-track-file', payload),
+  getTrackProperties: (filePath) => ipcRenderer.invoke('get-track-properties', filePath),
+  createAlbum: (payload) => ipcRenderer.invoke('create-album', payload),
+  moveAlbumFolder: (payload) => ipcRenderer.invoke('move-album-folder', payload),
+  renameAlbumFolder: (payload) => ipcRenderer.invoke('rename-album-folder', payload),
+  deleteAlbumFolder: (payload) => ipcRenderer.invoke('delete-album-folder', payload),
 
   // Controles de ventana
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
