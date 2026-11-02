@@ -33,27 +33,22 @@ function formatDateTime(ms) {
 }
 
 /**
- * Icono de marcador (Bookmark) fiel al diseño de la imagen proporcionada
+ * Icono de marcador (Bookmark) fiel al diseño de la imagen proporcionada por el usuario
  */
 function BookmarkIcon({ filled = false }) {
   return (
     <svg
-      width="17"
-      height="17"
+      width="16"
+      height="16"
       viewBox="0 0 24 24"
-      fill="none"
+      fill={filled ? 'currentColor' : 'none'}
       stroke="currentColor"
-      strokeWidth="2"
+      strokeWidth="2.2"
       strokeLinecap="round"
       strokeLinejoin="round"
       className="track-bookmark-svg"
     >
-      <path
-        d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"
-        fill={filled ? 'currentColor' : 'none'}
-        fillOpacity={filled ? '0.18' : '0'}
-      />
-      <line x1="8.5" y1="6.5" x2="15.5" y2="6.5" strokeWidth="1.7" />
+      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
     </svg>
   )
 }
