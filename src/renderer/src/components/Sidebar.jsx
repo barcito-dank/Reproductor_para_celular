@@ -1,5 +1,5 @@
-import { usePlayer } from '../context/PlayerContext'
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useLibrary } from '../context/PlayerContext'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
 
 /**
@@ -643,8 +643,9 @@ function Sidebar({ isOpen = true, onToggle }) {
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder
-  } = usePlayer()
+  } = useLibrary()
   const [searchQuery, setSearchQuery] = useState('')
+  const deferredSearchQuery = useDeferredValue(searchQuery)
   const [expandedFolders, setExpandedFolders] = useState({})
 
   // Estado para el bloque superior "Crear álbum"
@@ -967,11 +968,11 @@ function Sidebar({ isOpen = true, onToggle }) {
     }
   }, [deleteAlbumFolder, showSidebarNotice])
 
-  // Filtrado recursivo según la búsqueda
+  // Filtrado recursivo según la búsqueda (diferido para mantener 60 FPS en el input al escribir)
   const filteredTree = useMemo(() => {
-    if (!searchQuery.trim()) return library
+    if (!deferredSearchQuery.trim()) return library
 
-    const q = searchQuery.toLowerCase()
+    const q = deferredSearchQuery.toLowerCase()
 
     function filterNode(node) {
       if (node.type === 'album') {
@@ -1008,7 +1009,7 @@ function Sidebar({ isOpen = true, onToggle }) {
       if (filtered) result.push(filtered)
     }
     return result
-  }, [library, searchQuery])
+  }, [library, deferredSearchQuery])
 
   // Contar total de álbumes/elementos para el marcador colapsado
   const totalRootItems = library.length

@@ -1,5 +1,5 @@
 import { usePlayer } from '../context/PlayerContext'
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
 import { areSameTrack } from '../utils/trackUtils'
 
@@ -165,6 +165,8 @@ function AlbumMembershipPopover({
   allAlbums,
   albumInfo,
   onAddTrackToAlbum,
+  onRemoveTrackFromAlbum,
+  onRequestDeleteLastAlbum,
   onClose
 }) {
   const popoverRef = useRef(null)
@@ -173,11 +175,18 @@ function AlbumMembershipPopover({
 
   useEffect(() => {
     const handlePointerDown = (e) => {
+      // Si el clic ocurrió dentro de un modal de confirmación o backdrop, no cerrar el popover por debajo
+      if (e.target.closest && e.target.closest('.track-modal-backdrop')) {
+        return
+      }
       if (popoverRef.current && !popoverRef.current.contains(e.target)) {
         onClose()
       }
     }
     const handleKeyDown = (e) => {
+      if (document.querySelector('.track-modal-backdrop')) {
+        return
+      }
       if (e.key === 'Escape') onClose()
     }
     document.addEventListener('pointerdown', handlePointerDown)
@@ -214,15 +223,34 @@ function AlbumMembershipPopover({
   }
 
   const presentSet = albumInfo?.albumIdsSet || new Set()
-  const presentCount = albumInfo?.albumCount || 1
+  const presentCount = albumInfo?.albumCount || presentSet.size || 1
 
   const handleToggleAlbum = async (albumItem) => {
-    if (presentSet.has(albumItem.id) || busyAlbumId) return
-    setBusyAlbumId(albumItem.id)
-    try {
-      await onAddTrackToAlbum(track, albumItem)
-    } finally {
-      setBusyAlbumId(null)
+    if (busyAlbumId) return
+    const isPresent = presentSet.has(albumItem.id)
+
+    if (isPresent) {
+      // Al desmarcar: si es su único álbum, requiere confirmación porque la eliminaría de todos lados
+      if (presentCount <= 1) {
+        onRequestDeleteLastAlbum(track, albumItem)
+        return
+      }
+
+      // Si tiene más de un álbum, no necesita confirmación y se quita directamente
+      setBusyAlbumId(albumItem.id)
+      try {
+        await onRemoveTrackFromAlbum(track, albumItem)
+      } finally {
+        setBusyAlbumId(null)
+      }
+    } else {
+      // Al marcar: se copia/agrega al álbum seleccionado
+      setBusyAlbumId(albumItem.id)
+      try {
+        await onAddTrackToAlbum(track, albumItem)
+      } finally {
+        setBusyAlbumId(null)
+      }
     }
   }
 
@@ -273,7 +301,9 @@ function AlbumMembershipPopover({
               }}
               title={
                 isPresent
-                  ? `Esta canción ya se encuentra en "${alb.name}"`
+                  ? presentCount <= 1
+                    ? `Desmarcar para eliminar canción (es su único álbum "${alb.name}", requiere confirmación)`
+                    : `Desmarcar para quitar de "${alb.name}" (sin confirmación)`
                   : `Marcar para agregar copia a "${alb.name}"`
               }
             >
@@ -284,7 +314,7 @@ function AlbumMembershipPopover({
                 readOnly
               />
               <span className={`album-picker-check-box ${isPresent ? 'checked' : ''}`}>
-                {isPresent ? '✓' : isBusy ? '…' : ''}
+                {isBusy ? '…' : isPresent ? '✓' : ''}
               </span>
 
               {alb.cover ? (
@@ -301,7 +331,11 @@ function AlbumMembershipPopover({
               </div>
 
               <span className={`album-picker-status ${isPresent ? 'in-album' : 'add-hint'}`}>
-                {isBusy ? 'Copiando...' : isPresent ? 'En álbum' : '+ Agregar'}
+                {isBusy
+                  ? (isPresent ? 'Quitando...' : 'Copiando...')
+                  : isPresent
+                    ? 'En álbum'
+                    : '+ Agregar'}
               </span>
             </label>
           )
@@ -314,7 +348,7 @@ function AlbumMembershipPopover({
 
       <div className="album-picker-footer">
         <span className="album-picker-footer-hint">
-          Marca cualquier casilla para copiar la canción a ese álbum
+          Marca o desmarca casillas para agregar o quitar la canción de los álbumes
         </span>
         <button type="button" className="album-picker-done-btn" onClick={onClose}>
           Listo
@@ -335,7 +369,8 @@ function TrackContextMenu({
   onCopyTitle,
   onCopyArtist,
   onOpenProperties,
-  onRequestDelete
+  onRequestDelete,
+  albumInfo
 }) {
   const menuRef = useRef(null)
 
@@ -356,8 +391,8 @@ function TrackContextMenu({
     }
   }, [onClose])
 
-  const menuWidth = 215
-  const menuHeight = 185
+  const menuWidth = 235
+  const menuHeight = 225
   const winW = typeof window !== 'undefined' ? window.innerWidth : 1200
   const winH = typeof window !== 'undefined' ? window.innerHeight : 800
 
@@ -451,20 +486,38 @@ function TrackContextMenu({
           onClose()
         }}
       >
-        <span className="track-context-icon">ℹ️</span>
-        <span>Propiedades</span>
+        <span className="track-context-icon">✏️</span>
+        <span>Editar</span>
+        <span className="track-context-sub">Etiquetas</span>
       </button>
 
       <button
         type="button"
         className="track-context-item danger"
         onClick={() => {
-          onRequestDelete(track)
+          onRequestDelete(track, 'single')
           onClose()
         }}
       >
         <span className="track-context-icon">🗑️</span>
         <span>Eliminar</span>
+        <span className="track-context-sub">{albumInfo?.albumCount > 1 ? 'De este álbum' : ''}</span>
+      </button>
+
+      <button
+        type="button"
+        className="track-context-item danger"
+        onClick={() => {
+          onRequestDelete(track, 'all')
+          onClose()
+        }}
+        title="Eliminar esta canción de todos los álbumes donde exista"
+      >
+        <span className="track-context-icon">💥</span>
+        <span>Eliminar de todos los álbumes</span>
+        {albumInfo?.albumCount > 1 && (
+          <span className="track-context-sub">{albumInfo.albumCount} alb.</span>
+        )}
       </button>
     </div>
   )
@@ -472,9 +525,14 @@ function TrackContextMenu({
   return typeof document !== 'undefined' ? createPortal(content, document.body) : null
 }
 
-function TrackPropertiesModal({ track, albumInfo, onClose, onOpenFolder }) {
+function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
   const [details, setDetails] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [title, setTitle] = useState(track.title || '')
+  const [artist, setArtist] = useState(track.artist || '')
+  const [album, setAlbum] = useState(track.albumName || '')
+  const [isSaving, setIsSaving] = useState(false)
+  const hasUserEditedRef = useRef(false)
 
   useEffect(() => {
     let active = true
@@ -486,6 +544,11 @@ function TrackPropertiesModal({ track, albumInfo, onClose, onOpenFolder }) {
           if (active) {
             setDetails(res)
             setLoading(false)
+            if (!hasUserEditedRef.current && res) {
+              if (res.title) setTitle(res.title)
+              if (res.artist && res.artist !== 'Artista Desconocido') setArtist(res.artist)
+              if (res.album) setAlbum(res.album)
+            }
           }
         })
         .catch(() => {
@@ -496,14 +559,14 @@ function TrackPropertiesModal({ track, albumInfo, onClose, onOpenFolder }) {
     }
 
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !isSaving) onClose()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => {
       active = false
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [track, onClose])
+  }, [track, onClose, isSaving])
 
   if (!track) return null
 
@@ -517,90 +580,160 @@ function TrackPropertiesModal({ track, albumInfo, onClose, onOpenFolder }) {
     ? albumInfo.albumNames
     : [track.albumName || 'Álbum actual']
 
+  const handleFormSubmit = async (e) => {
+    if (e) e.preventDefault()
+    if (isSaving || !title.trim()) return
+    setIsSaving(true)
+    try {
+      await onSave(track, {
+        title: title.trim(),
+        artist: artist.trim() || 'Artista Desconocido',
+        album: album.trim() || null
+      })
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const modalContent = (
-    <div className="track-modal-backdrop" onClick={onClose}>
-      <div className="track-modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Propiedades de la canción">
-        <div className="track-modal-header">
-          <div className="track-modal-title-group">
-            {track.cover ? (
-              <img src={track.cover} alt="" className="track-modal-cover" />
-            ) : (
-              <div className="track-modal-cover-placeholder">🎵</div>
-            )}
-            <div>
-              <h3>Propiedades de la canción</h3>
-              <p className="track-modal-subtitle">{track.title}</p>
-            </div>
-          </div>
-          <button type="button" className="track-modal-close" onClick={onClose} title="Cerrar">
-            ✕
-          </button>
-        </div>
-
-        <div className="track-modal-body">
-          <div className="track-props-grid">
-            <div className="track-prop-row">
-              <span className="track-prop-label">Título</span>
-              <span className="track-prop-value">{details?.title || track.title}</span>
-            </div>
-            <div className="track-prop-row">
-              <span className="track-prop-label">Artista</span>
-              <span className="track-prop-value">{details?.artist || track.artist || 'Artista Desconocido'}</span>
-            </div>
-            <div className="track-prop-row">
-              <span className="track-prop-label">Álbumes ({albumNames.length})</span>
-              <div className="track-prop-value track-prop-badges">
-                {albumNames.map((name) => (
-                  <span key={name} className="track-prop-album-chip">{name}</span>
-                ))}
+    <div className="track-modal-backdrop" onClick={() => !isSaving && onClose()}>
+      <div className="track-modal-card track-edit-modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Editar información de la canción">
+        <form onSubmit={handleFormSubmit} className="track-modal-form">
+          <div className="track-modal-header">
+            <div className="track-modal-title-group">
+              {track.cover ? (
+                <img src={track.cover} alt="" className="track-modal-cover" />
+              ) : (
+                <div className="track-modal-cover-placeholder">🎵</div>
+              )}
+              <div>
+                <h3>Editar información de la canción</h3>
+                <p className="track-modal-subtitle">{track.title} — {track.artist}</p>
               </div>
             </div>
-            <div className="track-prop-row">
-              <span className="track-prop-label">Duración</span>
-              <span className="track-prop-value">
-                {formatTime(durationSec)} ({Math.round(durationSec)} segundos)
-              </span>
+            <button type="button" className="track-modal-close" onClick={onClose} disabled={isSaving} title="Cerrar">
+              ✕
+            </button>
+          </div>
+
+          <div className="track-modal-body">
+            {/* Campos Editables */}
+            <div className="track-edit-form-grid">
+              <div className="track-edit-field">
+                <label className="track-edit-label">Título</label>
+                <input
+                  type="text"
+                  className="track-edit-input"
+                  value={title}
+                  onChange={(e) => {
+                    hasUserEditedRef.current = true
+                    setTitle(e.target.value)
+                  }}
+                  placeholder="Título de la canción..."
+                  required
+                />
+              </div>
+
+              <div className="track-edit-field">
+                <label className="track-edit-label">Artista</label>
+                <input
+                  type="text"
+                  className="track-edit-input"
+                  value={artist}
+                  onChange={(e) => {
+                    hasUserEditedRef.current = true
+                    setArtist(e.target.value)
+                  }}
+                  placeholder="Artista o banda..."
+                />
+              </div>
+
+              <div className="track-edit-field">
+                <label className="track-edit-label">Álbum</label>
+                <input
+                  type="text"
+                  className="track-edit-input"
+                  value={album}
+                  onChange={(e) => {
+                    hasUserEditedRef.current = true
+                    setAlbum(e.target.value)
+                  }}
+                  placeholder="Nombre del álbum..."
+                />
+              </div>
             </div>
-            <div className="track-prop-row">
-              <span className="track-prop-label">Tamaño</span>
-              <span className="track-prop-value">
-                {loading && !sizeBytes ? 'Calculando...' : formatFileSize(sizeBytes)}
-              </span>
-            </div>
-            <div className="track-prop-row">
-              <span className="track-prop-label">Formato / Códec</span>
-              <span className="track-prop-value">
-                {codec}
-                {bitrate ? ` · ${bitrate} kbps` : ''}
-                {sampleRate ? ` · ${sampleRate} Hz` : ''}
-                {channels ? ` · ${channels === 2 ? 'Estéreo' : `${channels} canales`}` : ''}
-              </span>
-            </div>
-            {details?.modifiedAt > 0 && (
+
+            {/* Propiedades del Archivo */}
+            <div className="track-props-grid" style={{ marginTop: '16px' }}>
               <div className="track-prop-row">
-                <span className="track-prop-label">Modificado</span>
-                <span className="track-prop-value">{formatDateTime(details.modifiedAt)}</span>
+                <span className="track-prop-label">Álbumes ({albumNames.length})</span>
+                <div className="track-prop-value track-prop-badges">
+                  {albumNames.map((name) => (
+                    <span key={name} className="track-prop-album-chip">{name}</span>
+                  ))}
+                </div>
               </div>
-            )}
-            <div className="track-prop-row">
-              <span className="track-prop-label">Ubicación</span>
-              <span className="track-prop-value track-prop-path">{track.path}</span>
+              <div className="track-prop-row">
+                <span className="track-prop-label">Duración</span>
+                <span className="track-prop-value">
+                  {formatTime(durationSec)} ({Math.round(durationSec)} segundos)
+                </span>
+              </div>
+              <div className="track-prop-row">
+                <span className="track-prop-label">Tamaño</span>
+                <span className="track-prop-value">
+                  {loading && !sizeBytes ? 'Calculando...' : formatFileSize(sizeBytes)}
+                </span>
+              </div>
+              <div className="track-prop-row">
+                <span className="track-prop-label">Formato / Códec</span>
+                <span className="track-prop-value">
+                  {codec}
+                  {bitrate ? ` · ${bitrate} kbps` : ''}
+                  {sampleRate ? ` · ${sampleRate} Hz` : ''}
+                  {channels ? ` · ${channels === 2 ? 'Estéreo' : `${channels} canales`}` : ''}
+                </span>
+              </div>
+              {details?.modifiedAt > 0 && (
+                <div className="track-prop-row">
+                  <span className="track-prop-label">Modificado</span>
+                  <span className="track-prop-value">{formatDateTime(details.modifiedAt)}</span>
+                </div>
+              )}
+              <div className="track-prop-row">
+                <span className="track-prop-label">Ubicación</span>
+                <span className="track-prop-value track-prop-path">{track.path}</span>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="track-modal-footer">
-          <button
-            type="button"
-            className="track-modal-btn secondary"
-            onClick={() => onOpenFolder(track)}
-          >
-            📂 Abrir ubicación
-          </button>
-          <button type="button" className="track-modal-btn primary" onClick={onClose}>
-            Cerrar
-          </button>
-        </div>
+          <div className="track-modal-footer">
+            <button
+              type="button"
+              className="track-modal-btn secondary"
+              onClick={() => onOpenFolder(track)}
+            >
+              📂 Abrir ubicación
+            </button>
+            <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
+              <button
+                type="button"
+                className="track-modal-btn secondary"
+                onClick={onClose}
+                disabled={isSaving}
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="track-modal-btn primary"
+                disabled={isSaving || !title.trim()}
+              >
+                {isSaving ? 'Guardando...' : 'Aceptar'}
+              </button>
+            </div>
+          </div>
+        </form>
       </div>
     </div>
   )
@@ -608,7 +741,7 @@ function TrackPropertiesModal({ track, albumInfo, onClose, onOpenFolder }) {
   return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : null
 }
 
-function DeleteTrackConfirmModal({ track, onCancel, onConfirm, isDeleting }) {
+function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && !isDeleting) onCancel()
@@ -617,24 +750,60 @@ function DeleteTrackConfirmModal({ track, onCancel, onConfirm, isDeleting }) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onCancel, isDeleting])
 
+  const track = target?.track || target
+  const album = target?.album || null
+  const mode = target?.mode || 'single'
+  const isLastAlbum = Boolean(target?.isLastAlbum)
+  const albumNames = target?.albumNames || (album?.name ? [album.name] : [])
+  const isAllMode = mode === 'all'
+
   if (!track) return null
 
   const modalContent = (
     <div className="track-modal-backdrop" onClick={() => !isDeleting && onCancel()}>
-      <div className="track-modal-card confirm-delete-card" onClick={(e) => e.stopPropagation()} role="alertdialog" aria-label="Confirmar eliminación">
+      <div
+        className="track-modal-card confirm-delete-card"
+        onClick={(e) => e.stopPropagation()}
+        role="alertdialog"
+        aria-label={isAllMode ? 'Confirmar eliminación de todos los álbumes' : isLastAlbum ? 'Confirmar quitar de único álbum' : 'Confirmar eliminación'}
+      >
         <div className="track-modal-header">
           <div className="track-modal-title-group">
-            <div className="track-delete-icon-badge">🗑️</div>
+            <div className="track-delete-icon-badge">{isAllMode ? '💥' : isLastAlbum ? '⚠️' : '🗑️'}</div>
             <div>
-              <h3>¿Eliminar esta canción?</h3>
-              <p className="track-modal-subtitle">{track.title} — {track.artist}</p>
+              <h3>
+                {isAllMode
+                  ? '¿Eliminar de todos los álbumes?'
+                  : isLastAlbum
+                    ? '¿Quitar de su único álbum y eliminar?'
+                    : `¿Quitar del álbum "${album?.name || 'este álbum'}"?`}
+              </h3>
+              <p className="track-modal-subtitle">
+                {track.title} — {track.artist}
+              </p>
             </div>
           </div>
         </div>
 
         <div className="track-modal-body">
           <p className="track-delete-warning">
-            Se eliminará el archivo de audio del disco (se enviará a la Papelera de reciclaje):
+            {isAllMode ? (
+              <>
+                Esta canción será eliminada por completo de <strong>todos los álbumes</strong> donde se encuentra
+                {albumNames.length > 0 && ` (${albumNames.join(', ')})`}. Todos los archivos de audio asociados se enviarán a la Papelera de reciclaje:
+              </>
+            ) : isLastAlbum ? (
+              <>
+                Esta canción solo pertenece al álbum{' '}
+                <strong>&ldquo;{album?.name || track.albumName || 'este álbum'}&rdquo;</strong>.
+                Al eliminarla, se borrará de la biblioteca y el archivo de audio se enviará a la Papelera de reciclaje:
+              </>
+            ) : (
+              <>
+                Se quitará la copia de esta canción de la carpeta de{' '}
+                <strong>&ldquo;{album?.name || 'este álbum'}&rdquo;</strong>. La canción seguirá estando disponible en los demás álbumes donde está agregada:
+              </>
+            )}
           </p>
           <div className="track-delete-path-box">{track.path}</div>
         </div>
@@ -651,10 +820,16 @@ function DeleteTrackConfirmModal({ track, onCancel, onConfirm, isDeleting }) {
           <button
             type="button"
             className="track-modal-btn danger"
-            onClick={() => onConfirm(track)}
+            onClick={() => onConfirm(target)}
             disabled={isDeleting}
           >
-            {isDeleting ? 'Eliminando...' : 'Sí, eliminar archivo'}
+            {isDeleting
+              ? 'Eliminando...'
+              : isAllMode
+                ? 'Sí, eliminar de todos los álbumes'
+                : isLastAlbum
+                  ? 'Sí, eliminar de todos lados'
+                  : 'Sí, quitar de este álbum'}
           </button>
         </div>
       </div>
@@ -670,7 +845,10 @@ function AlbumView() {
     allAlbums,
     getTrackAlbumInfo,
     addTrackToAlbums,
+    removeTrackFromAlbum,
     deleteTrackFromDisk,
+    deleteTrackFromAllAlbums,
+    updateTrackTags,
     playAlbum,
     playTrack,
     currentTrack,
@@ -679,6 +857,7 @@ function AlbumView() {
     library
   } = usePlayer()
   const [filterText, setFilterText] = useState('')
+  const deferredFilterText = useDeferredValue(filterText)
   const [sortBy, setSortBy] = useState('default') // 'default' | 'title-asc' | 'title-desc' | 'artist-asc' | 'artist-desc'
   const listRef = useRef(null)
   const [startIndex, setStartIndex] = useState(0)
@@ -721,6 +900,16 @@ function AlbumView() {
     setContextMenuState({ track, position })
   }, [])
 
+  const handleSaveTrackTags = useCallback(async (track, newTags) => {
+    const res = await updateTrackTags(track, newTags)
+    if (res && res.success) {
+      showFeedback(`✓ Información actualizada: "${newTags.title}"`)
+      setPropertiesTrack(null)
+    } else {
+      showFeedback(`⚠ ${res?.error || 'No se pudieron guardar los cambios'}`)
+    }
+  }, [updateTrackTags, showFeedback])
+
   const handleOpenInFolder = useCallback((track) => {
     if (track?.path && window.electronAPI?.showItemInFolder) {
       window.electronAPI.showItemInFolder(track.path)
@@ -740,29 +929,66 @@ function AlbumView() {
   }, [showFeedback])
 
   const handleAddTrackToSingleAlbum = useCallback(async (track, targetAlbum) => {
-    const res = await addTrackToAlbums(track, [targetAlbum])
+    // Si la pista actual proviene de una referencia virtual o modificada, asegurar una copia con ruta física válida
+    const info = getTrackAlbumInfo(track)
+    const validTrack =
+      info?.copies && info.copies.length > 0 && info.copies[0].track
+        ? info.copies[0].track
+        : track
+
+    const res = await addTrackToAlbums(validTrack, [targetAlbum])
     if (res && res.success) {
       showFeedback(`✓ "${track.title}" agregada al álbum "${targetAlbum.name}"`)
     } else {
       showFeedback(`⚠ No se pudo agregar a "${targetAlbum.name}"`)
     }
-  }, [addTrackToAlbums, showFeedback])
+  }, [addTrackToAlbums, getTrackAlbumInfo, showFeedback])
 
-  const handleConfirmDeleteTrack = useCallback(async (track) => {
+  const handleRemoveTrackFromSingleAlbum = useCallback(async (track, targetAlbum) => {
+    const res = await removeTrackFromAlbum(track, targetAlbum)
+    if (res && res.success) {
+      showFeedback(`✓ "${track.title}" quitada del álbum "${targetAlbum.name}"`)
+    } else {
+      showFeedback(`⚠ No se pudo quitar de "${targetAlbum.name}": ${res?.error || 'Error desconocido'}`)
+    }
+    return res
+  }, [removeTrackFromAlbum, showFeedback])
+
+  const handleConfirmDeleteTrack = useCallback(async (target) => {
+    const track = target?.track || target
+    const album = target?.album || selectedAlbum
+    const mode = target?.mode || 'single'
+    const isLastAlbum = Boolean(target?.isLastAlbum)
     if (!track) return
+
     setIsDeletingTrack(true)
     try {
-      const res = await deleteTrackFromDisk(track)
+      let res
+      if (mode === 'all') {
+        res = await deleteTrackFromAllAlbums(track)
+      } else if (album && !isLastAlbum) {
+        res = await removeTrackFromAlbum(track, album)
+      } else {
+        res = await deleteTrackFromDisk(track)
+      }
+
       if (res && res.success) {
-        showFeedback(`🗑️ Eliminada: "${track.title}"`)
+        showFeedback(
+          mode === 'all'
+            ? `🗑️ Eliminada de todos los álbumes: "${track.title}"`
+            : isLastAlbum
+              ? `🗑️ Eliminada de todos lados: "${track.title}"`
+              : `🗑️ Quitada del álbum "${album?.name || 'este álbum'}": "${track.title}"`
+        )
         setDeleteTargetTrack(null)
+        setAlbumPickerState(null)
       } else {
         showFeedback(`⚠ Error al eliminar: ${res?.error || 'No se pudo borrar el archivo'}`)
       }
     } finally {
       setIsDeletingTrack(false)
     }
-  }, [deleteTrackFromDisk, showFeedback])
+  }, [selectedAlbum, deleteTrackFromAllAlbums, removeTrackFromAlbum, deleteTrackFromDisk, showFeedback])
 
   // Alternar orden por título: default -> A-Z -> Z-A -> default
   const handleToggleTitleSort = useCallback(() => {
@@ -782,14 +1008,14 @@ function AlbumView() {
     })
   }, [])
 
-  // Filtrado y ordenamiento de canciones
+  // Filtrado y ordenamiento de canciones (con deferredFilterText para respuesta instantánea de escritura)
   const displayTracks = useMemo(() => {
     if (!selectedAlbum || !selectedAlbum.tracks) return []
     let list = selectedAlbum.tracks
 
     // 1. Filtrado por texto (título o artista)
-    if (filterText.trim()) {
-      const q = filterText.toLowerCase()
+    if (deferredFilterText.trim()) {
+      const q = deferredFilterText.toLowerCase()
       list = list.filter((t) =>
         t.title.toLowerCase().includes(q) ||
         (t.artist && t.artist.toLowerCase().includes(q))
@@ -824,7 +1050,7 @@ function AlbumView() {
       default:
         return copy
     }
-  }, [selectedAlbum, filterText, sortBy])
+  }, [selectedAlbum, deferredFilterText, sortBy])
 
   const updateVisibleWindow = useCallback(() => {
     const listEl = listRef.current
@@ -879,7 +1105,7 @@ function AlbumView() {
     }
 
     updateVisibleWindow()
-  }, [selectedAlbum?.id, displayTracks.length, filterText, sortBy, updateVisibleWindow])
+  }, [selectedAlbum?.id, displayTracks.length, deferredFilterText, sortBy, updateVisibleWindow])
 
   const totalDuration = useMemo(() => {
     if (!selectedAlbum?.tracks) return 0
@@ -1109,6 +1335,10 @@ function AlbumView() {
           allAlbums={allAlbums}
           albumInfo={getTrackAlbumInfo(albumPickerState.track)}
           onAddTrackToAlbum={handleAddTrackToSingleAlbum}
+          onRemoveTrackFromAlbum={handleRemoveTrackFromSingleAlbum}
+          onRequestDeleteLastAlbum={(track, album) =>
+            setDeleteTargetTrack({ track, album, isLastAlbum: true, mode: 'single' })
+          }
           onClose={() => setAlbumPickerState(null)}
         />
       )}
@@ -1124,24 +1354,35 @@ function AlbumView() {
           onCopyTitle={handleCopyTitle}
           onCopyArtist={handleCopyArtist}
           onOpenProperties={(t) => setPropertiesTrack(t)}
-          onRequestDelete={(t) => setDeleteTargetTrack(t)}
+          onRequestDelete={(t, mode = 'single') => {
+            const albumInfo = getTrackAlbumInfo(t)
+            setDeleteTargetTrack({
+              track: t,
+              album: selectedAlbum,
+              mode,
+              isLastAlbum: (albumInfo?.albumCount || 1) <= 1,
+              albumNames: albumInfo?.albumNames || []
+            })
+          }}
+          albumInfo={getTrackAlbumInfo(contextMenuState.track)}
         />
       )}
 
-      {/* Modal de Propiedades Detalladas */}
+      {/* Modal de Edición de Información y Etiquetas (Tag Editor) */}
       {propertiesTrack && (
-        <TrackPropertiesModal
+        <TrackEditModal
           track={propertiesTrack}
           albumInfo={getTrackAlbumInfo(propertiesTrack)}
           onClose={() => setPropertiesTrack(null)}
           onOpenFolder={handleOpenInFolder}
+          onSave={handleSaveTrackTags}
         />
       )}
 
       {/* Modal de Confirmación de Eliminación */}
       {deleteTargetTrack && (
         <DeleteTrackConfirmModal
-          track={deleteTargetTrack}
+          target={deleteTargetTrack}
           onCancel={() => setDeleteTargetTrack(null)}
           onConfirm={handleConfirmDeleteTrack}
           isDeleting={isDeletingTrack}

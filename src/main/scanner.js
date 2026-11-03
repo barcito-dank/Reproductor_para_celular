@@ -96,6 +96,15 @@ async function ensureCoversDir(baseDir, userDataDir) {
     try {
       await fs.promises.mkdir(candidate, { recursive: true })
       activeCoversDir = candidate
+
+      // Pre-cargar en memoria los nombres de carátulas existentes para validaciones O(1) sin I/O a disco
+      try {
+        const existingFiles = await fs.promises.readdir(candidate)
+        for (const file of existingFiles) {
+          knownCovers.add(path.join(candidate, file))
+        }
+      } catch (_) {}
+
       return activeCoversDir
     } catch (err) {
       console.warn(`No se pudo crear directorio de carátulas en ${candidate}:`, err.message)
@@ -476,9 +485,9 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
 
 /**
  * Recorre el árbol de álbumes para identificar canciones iguales en diferentes álbumes,
- * anota en cada canción cuántos y cuáles álbumes la contienen, y persiste el modelo en disco.
+ * anota en memoria en cada canción cuántos y cuáles álbumes la contienen.
  */
-async function annotateAndSaveSongAlbumsModel(tree, baseDir, userDataDir) {
+function annotateSongAlbumsModel(tree) {
   const albumNodes = []
   function collectAlbums(nodes) {
     if (!nodes || !Array.isArray(nodes)) return
@@ -558,6 +567,11 @@ async function annotateAndSaveSongAlbumsModel(tree, baseDir, userDataDir) {
     }
   }
 
+  return persistedIndex
+}
+
+async function saveSongAlbumsModel(persistedIndex, baseDir, userDataDir) {
+  if (!persistedIndex) return
   const indexPath = getSongAlbumsIndexPath(baseDir, userDataDir)
   try {
     await fs.promises.mkdir(path.dirname(indexPath), { recursive: true })
@@ -624,8 +638,16 @@ async function scanMusicDirectory(baseDir, userDataDir = null) {
   // Ordenar árbol alfabéticamente
   tree.sort((a, b) => a.name.localeCompare(b.name))
 
-  await annotateAndSaveSongAlbumsModel(tree, baseDir, userDataDir)
-  await saveCache(baseDir, userDataDir)
+  // Anotación en memoria imprescindible para el árbol
+  const persistedIndex = annotateSongAlbumsModel(tree)
+
+  // Guardado de índices y caché en disco en segundo plano (no bloquea el retorno ni la interfaz)
+  saveSongAlbumsModel(persistedIndex, baseDir, userDataDir).catch((err) => {
+    console.warn('Aviso guardando índice de álbumes en disco:', err.message)
+  })
+  saveCache(baseDir, userDataDir).catch((err) => {
+    console.warn('Aviso guardando caché en disco:', err.message)
+  })
 
   return tree
 }

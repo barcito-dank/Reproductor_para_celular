@@ -14,7 +14,7 @@ function MainPlayerApp({ theme, onThemeChange }) {
   const [isSpotlightOpen, setIsSpotlightOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const settingsMenuRef = useRef(null)
-  const { currentTrack, selectedAlbum, togglePlay, volume, setVolumeLevel, musicDirectory, updateMusicDirectory } = usePlayer()
+  const { currentTrack, selectedAlbum, togglePlay, adjustVolume, musicDirectory, updateMusicDirectory } = usePlayer()
 
   useEffect(() => {
     if (!isSettingsOpen) return undefined
@@ -80,6 +80,13 @@ function MainPlayerApp({ theme, onThemeChange }) {
         return
       }
 
+      // Atajo Ctrl+Space (o Cmd+Space) para pausar / despausar en cualquier momento
+      if ((e.ctrlKey || e.metaKey) && e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+        return
+      }
+
       // Ignorar controles de reproducción si el usuario está escribiendo en un input o campo de búsqueda
       const activeTag = document.activeElement?.tagName?.toLowerCase()
       if (activeTag === 'input' || activeTag === 'textarea') return
@@ -89,16 +96,16 @@ function MainPlayerApp({ theme, onThemeChange }) {
         togglePlay()
       } else if (e.code === 'ArrowUp') {
         e.preventDefault()
-        setVolumeLevel(Math.min(1, Math.round(((volume ?? 0.8) + 0.05) * 100) / 100))
+        adjustVolume(0.05)
       } else if (e.code === 'ArrowDown') {
         e.preventDefault()
-        setVolumeLevel(Math.max(0, Math.round(((volume ?? 0.8) - 0.05) * 100) / 100))
+        adjustVolume(-0.05)
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [togglePlay, volume, setVolumeLevel])
+  }, [togglePlay, adjustVolume])
 
   return (
     <div className="app">

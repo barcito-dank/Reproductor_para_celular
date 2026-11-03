@@ -1,6 +1,7 @@
-import { usePlayer, usePlayerTime } from '../context/PlayerContext'
-import React, { useState, useRef, useCallback } from 'react'
+import { usePlayer, usePlayerTime, EQ_FREQUENCIES, EQ_PRESETS } from '../context/PlayerContext'
+import React, { useState, useRef, useCallback, useEffect } from 'react'
 import AudioVisualizer from './AudioVisualizer'
+import LyricsDock from './LyricsDock'
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -172,6 +173,139 @@ function PlayerTimeline({ duration, isPlaying, seekTo }) {
   )
 }
 
+/**
+ * Modal del Ecualizador Paramétrico de 10 Bandas con Web Audio API en tiempo real
+ */
+function EqualizerModal({
+  isOpen,
+  onClose,
+  eqState,
+  setEqBandGain,
+  applyEqPreset,
+  toggleEqEnabled,
+  resetEq,
+  EQ_FREQUENCIES = [],
+  EQ_PRESETS = {}
+}) {
+  const modalRef = useRef(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onClose()
+    }
+    const handlePointerDown = (e) => {
+      if (modalRef.current && !modalRef.current.contains(e.target)) {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [isOpen, onClose])
+
+  if (!isOpen || !eqState) return null
+
+  const formatHz = (freq) => {
+    return freq >= 1000 ? `${freq / 1000}k` : `${freq}`
+  }
+
+  return (
+    <div className="eq-modal-backdrop">
+      <div className="eq-modal-card" ref={modalRef} role="dialog" aria-label="Ecualizador de audio">
+        <div className="eq-modal-header">
+          <div className="eq-modal-title-group">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
+              <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
+              <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
+              <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
+            </svg>
+            <div>
+              <h3>Ecualizador de 10 bandas</h3>
+              <p className="eq-modal-subtitle">Procesamiento Web Audio API en tiempo real</p>
+            </div>
+          </div>
+
+          <div className="eq-header-actions">
+            <button
+              type="button"
+              className={`eq-power-btn ${eqState.enabled ? 'active' : ''}`}
+              onClick={toggleEqEnabled}
+              title={eqState.enabled ? 'Desactivar ecualizador' : 'Activar ecualizador'}
+            >
+              <span className="eq-power-indicator" />
+              <span>{eqState.enabled ? 'Activado' : 'Desactivado'}</span>
+            </button>
+            <button type="button" className="eq-modal-close" onClick={onClose} title="Cerrar">
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* Barra de Perfiles / Presets */}
+        <div className="eq-presets-bar">
+          <span className="eq-presets-label">Perfiles:</span>
+          <div className="eq-presets-scroll">
+            {Object.keys(EQ_PRESETS).map((pName) => (
+              <button
+                key={pName}
+                type="button"
+                className={`eq-preset-pill ${eqState.preset === pName ? 'active' : ''}`}
+                onClick={() => applyEqPreset(pName)}
+              >
+                {pName}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="eq-reset-btn" onClick={resetEq} title="Restablecer a plano (0 dB)">
+            Restablecer
+          </button>
+        </div>
+
+        {/* Sliders Verticales */}
+        <div className={`eq-sliders-container ${!eqState.enabled ? 'eq-disabled' : ''}`}>
+          <div className="eq-scale-labels">
+            <span>+12 dB</span>
+            <span>0 dB</span>
+            <span>-12 dB</span>
+          </div>
+
+          <div className="eq-sliders-track-area">
+            <div className="eq-center-zero-line" />
+            {EQ_FREQUENCIES.map((freq, i) => {
+              const gain = eqState.gains[i] ?? 0
+              return (
+                <div key={freq} className="eq-band-col">
+                  <span className="eq-band-db">
+                    {gain > 0 ? `+${gain.toFixed(0)}` : gain.toFixed(0)}
+                  </span>
+                  <div className="eq-slider-wrapper">
+                    <input
+                      type="range"
+                      min="-12"
+                      max="12"
+                      step="0.5"
+                      value={gain}
+                      disabled={!eqState.enabled}
+                      onChange={(e) => setEqBandGain(i, parseFloat(e.target.value))}
+                      className="eq-vertical-slider"
+                    />
+                  </div>
+                  <span className="eq-band-freq">{formatHz(freq)}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Player() {
   const {
     currentTrack,
@@ -186,11 +320,45 @@ function Player() {
     seekTo,
     setVolumeLevel,
     toggleShuffle,
-    toggleLoop
+    toggleLoop,
+    eqState,
+    setEqBandGain,
+    applyEqPreset,
+    toggleEqEnabled,
+    resetEq
   } = usePlayer()
 
   const [prevVolume, setPrevVolume] = useState(0.8)
-  const [showVisualizer, setShowVisualizer] = useState(true)
+  const [showVisualizer, setShowVisualizer] = useState(() => {
+    const saved = localStorage.getItem('rep_show_visualizer')
+    return saved === null ? true : saved === 'true'
+  })
+  const [showEqModal, setShowEqModal] = useState(false)
+  const [showLyrics, setShowLyrics] = useState(() => {
+    const saved = localStorage.getItem('rep_show_lyrics')
+    return saved === 'true'
+  })
+
+  const toggleVisualizer = useCallback(() => {
+    setShowVisualizer((prev) => {
+      const next = !prev
+      localStorage.setItem('rep_show_visualizer', String(next))
+      return next
+    })
+  }, [])
+
+  const toggleLyrics = useCallback(() => {
+    setShowLyrics((prev) => {
+      const next = !prev
+      localStorage.setItem('rep_show_lyrics', String(next))
+      return next
+    })
+  }, [])
+
+  const closeLyrics = useCallback(() => {
+    setShowLyrics(false)
+    localStorage.setItem('rep_show_lyrics', 'false')
+  }, [])
 
   const handleVolumeClick = useCallback((e) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -294,15 +462,44 @@ function Player() {
         onWheel={handleVolumeWheel}
         title="Usa la rueda del ratón para ajustar el volumen"
       >
+        {/* Botón Ecualizador de 10 Bandas */}
         <button
-          className={`player-btn visualizer-btn ${showVisualizer ? 'active' : ''}`}
-          onClick={() => setShowVisualizer(prev => !prev)}
-          title={showVisualizer ? 'Ocultar visualizador de espectro real' : 'Mostrar visualizador de espectro real'}
+          className={`player-btn eq-btn ${showEqModal ? 'active' : ''} ${eqState?.enabled ? 'eq-powered' : ''}`}
+          onClick={() => setShowEqModal(prev => !prev)}
+          title={eqState?.enabled ? `Ecualizador: Activado (${eqState.preset})` : 'Ecualizador de audio de 10 bandas'}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2V3h-2v16zm4 0h2v-8h-2v8zm4 0h2v-4h-2v4z"/>
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
+            <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
+            <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
+            <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
           </svg>
         </button>
+
+        {/* Columna vertical compacta: Visualizador (arriba) y Letras (abajo) */}
+        <div className="player-twin-stack">
+          <button
+            className={`player-btn visualizer-btn mini-btn ${showVisualizer ? 'active' : ''}`}
+            onClick={toggleVisualizer}
+            title={showVisualizer ? 'Ocultar visualizador de espectro' : 'Mostrar visualizador de espectro'}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2V3h-2v16zm4 0h2v-8h-2v8zm4 0h2v-4h-2v4z"/>
+            </svg>
+          </button>
+
+          <button
+            className={`player-btn lyrics-btn mini-btn ${showLyrics ? 'active' : ''}`}
+            onClick={toggleLyrics}
+            title={showLyrics ? 'Ocultar letras (LRC / ID3)' : 'Mostrar letras sincronizadas (LRC / ID3)'}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+            </svg>
+          </button>
+        </div>
 
         <button className="player-btn volume-btn" onClick={toggleMute} title={volume === 0 ? 'Activar sonido' : 'Silenciar'}>
           {volume === 0 ? <Icons.Mute /> : <Icons.Volume />}
@@ -315,6 +512,27 @@ function Player() {
           </div>
         </div>
       </div>
+
+      {/* Modal del Ecualizador */}
+      <EqualizerModal
+        isOpen={showEqModal}
+        onClose={() => setShowEqModal(false)}
+        eqState={eqState}
+        setEqBandGain={setEqBandGain}
+        applyEqPreset={applyEqPreset}
+        toggleEqEnabled={toggleEqEnabled}
+        resetEq={resetEq}
+        EQ_FREQUENCIES={EQ_FREQUENCIES}
+        EQ_PRESETS={EQ_PRESETS}
+      />
+
+      {/* Dock Flotante de Letras (3 Líneas / Modo Expandido) */}
+      <LyricsDock
+        isOpen={showLyrics}
+        onClose={closeLyrics}
+        currentTrack={currentTrack}
+        seekTo={seekTo}
+      />
     </div>
   </div>
   )

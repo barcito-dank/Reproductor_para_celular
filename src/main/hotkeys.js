@@ -22,7 +22,7 @@ export const HOTKEY_CONFIG = {
   previous: ['Ctrl+Left', 'MediaPreviousTrack', 'Ctrl+Alt+Left'],
 
   // Play / Pausa
-  playPause: ['MediaPlayPause', 'Ctrl+Shift+Space', 'Ctrl+Alt+Space'],
+  playPause: ['MediaPlayPause', 'Ctrl+Shift+Space', 'Ctrl+Alt+Space', 'Ctrl+Space'],
 
   // Subir volumen (+5%)
   volumeUp: ['Ctrl+Up', 'Ctrl+Alt+Up'],

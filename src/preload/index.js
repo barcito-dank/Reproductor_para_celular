@@ -8,6 +8,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addTrackToAlbums: (payload) => ipcRenderer.invoke('add-track-to-albums', payload),
   deleteTrackFile: (payload) => ipcRenderer.invoke('delete-track-file', payload),
   getTrackProperties: (filePath) => ipcRenderer.invoke('get-track-properties', filePath),
+  updateTrackTags: (payload) => ipcRenderer.invoke('update-track-tags', payload),
+  getTrackLyrics: (filePath) => ipcRenderer.invoke('get-track-lyrics', filePath),
+  onLibraryUpdated: (callback) => {
+    const handler = (_, library) => callback(library)
+    ipcRenderer.on('library-updated', handler)
+    return () => ipcRenderer.removeListener('library-updated', handler)
+  },
   createAlbum: (payload) => ipcRenderer.invoke('create-album', payload),
   moveAlbumFolder: (payload) => ipcRenderer.invoke('move-album-folder', payload),
   renameAlbumFolder: (payload) => ipcRenderer.invoke('rename-album-folder', payload),

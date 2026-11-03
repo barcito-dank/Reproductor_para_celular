@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, useDeferredValue } from 'react'
 import { usePlayer } from '../context/PlayerContext'
-import { getTrackUniqueKey, areSameTrack } from '../utils/trackUtils'
+import { areSameTrack } from '../utils/trackUtils'
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -10,46 +10,16 @@ function formatTime(seconds) {
 }
 
 function SpotlightSearch({ isOpen, onClose }) {
-  const { allAlbums, playTrack, setSelectedAlbum, currentTrack, isPlaying } = usePlayer()
+  const { allTracks = [], allAlbums = [], playTrack, setSelectedAlbum, currentTrack, isPlaying } = usePlayer()
   const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef(null)
   const listRef = useRef(null)
 
-  // Aplanar pistas únicas de la biblioteca (más de 1.300 canciones únicas)
-  const allTracks = useMemo(() => {
-    if (!allAlbums || allAlbums.length === 0) return []
-    const list = []
-    const seenByKey = new Map()
-
-    for (const album of allAlbums) {
-      if (!album.tracks) continue
-      for (const track of album.tracks) {
-        const uniqueKey = getTrackUniqueKey(track)
-        const cover = track.cover || album.cover || null
-        if (!seenByKey.has(uniqueKey)) {
-          seenByKey.set(uniqueKey, list.length)
-          list.push({
-            ...track,
-            uniqueKey,
-            albumObj: album,
-            albumName: album.name,
-            cover
-          })
-        } else {
-          const existingIdx = seenByKey.get(uniqueKey)
-          if (existingIdx !== undefined && !list[existingIdx].cover && cover) {
-            list[existingIdx] = { ...list[existingIdx], cover }
-          }
-        }
-      }
-    }
-    return list
-  }, [allAlbums])
-
-  // Filtrado reactivo ultra rápido (<2ms)
+  // Filtrado reactivo ultra rápido (<2ms) sobre el listado canónico ya provisto por el contexto
   const filteredResults = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = deferredQuery.trim().toLowerCase()
     if (!q) {
       // Sugerencias iniciales si no hay texto
       return allTracks.slice(0, 15)
@@ -64,7 +34,7 @@ function SpotlightSearch({ isOpen, onClose }) {
         )
       })
       .slice(0, 50) // Máximo 50 resultados para rendimiento óptimo
-  }, [allTracks, query])
+  }, [allTracks, deferredQuery])
 
   // Resetear selección al cambiar de búsqueda
   useEffect(() => {
@@ -114,19 +84,20 @@ function SpotlightSearch({ isOpen, onClose }) {
   }
 
   const handlePlayItem = (item) => {
-    const album = item.albumObj
+    const album = item.albumObj || (allAlbums && allAlbums.find((a) => a.id === item.albumId))
     const playlist = album?.tracks || [item]
     const indexInAlbum = playlist.findIndex((t) => t.id === item.id)
 
-    setSelectedAlbum(album)
+    if (album) setSelectedAlbum(album)
     playTrack(item, album, playlist, indexInAlbum >= 0 ? indexInAlbum : 0)
     onClose()
   }
 
   const handleGoToAlbum = (e, item) => {
     e.stopPropagation()
-    if (item.albumObj) {
-      setSelectedAlbum(item.albumObj)
+    const album = item.albumObj || (allAlbums && allAlbums.find((a) => a.id === item.albumId))
+    if (album) {
+      setSelectedAlbum(album)
     }
     onClose()
   }

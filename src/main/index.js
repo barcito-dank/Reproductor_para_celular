@@ -1,14 +1,18 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { parseFile } from 'music-metadata'
+import NodeID3 from 'node-id3'
 import { scanMusicDirectory, removeFromMetadataCache } from './scanner'
 import { registerHotkeys, unregisterHotkeys, HOTKEY_CONFIG } from './hotkeys'
 
 let mainWindow = null
 let sidePanel = null
 let notificationWindow = null
+let tray = null
+let dirWatcher = null
+let watcherDebounceTimer = null
 let sidePanelMode = 'hidden' // 'hidden' | 'marker' | 'expanded'
 let isSidePanelExpanded = false
 let isMarkerShowing = false
@@ -90,6 +94,125 @@ function getAppIconPath() {
   const p2 = path.join(process.resourcesPath, 'icon.png')
   if (fs.existsSync(p2)) return p2
   return undefined
+}
+
+function createTray() {
+  if (tray) return
+  const iconPath = getAppIconPath() || path.join(__dirname, '../../resources/icon.ico')
+  if (!iconPath || !fs.existsSync(iconPath)) return
+
+  try {
+    tray = new Tray(iconPath)
+    updateTrayMenu()
+    tray.setToolTip('Reproductor de Música')
+
+    tray.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isVisible()) {
+        if (mainWindow.isMinimized()) {
+          mainWindow.restore()
+        }
+        mainWindow.focus()
+      } else {
+        mainWindow.show()
+        mainWindow.focus()
+      }
+    })
+  } catch (err) {
+    console.warn('No se pudo inicializar la bandeja del sistema (Tray):', err.message)
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray || tray.isDestroyed()) return
+  const isPlaying = lastPlayerState?.isPlaying ?? false
+  const trackTitle = lastPlayerState?.currentTrack?.title
+    ? `${lastPlayerState.currentTrack.title} — ${lastPlayerState.currentTrack.artist || 'Artista'}`
+    : 'Reproductor de Música'
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: trackTitle.length > 36 ? trackTitle.slice(0, 36) + '…' : trackTitle,
+      enabled: false
+    },
+    { type: 'separator' },
+    {
+      label: isPlaying ? '⏸ Pausar' : '▶ Reproducir',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('player-command', 'toggle-play')
+        }
+      }
+    },
+    {
+      label: '⏭ Siguiente',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('player-command', 'next')
+        }
+      }
+    },
+    {
+      label: '⏮ Anterior',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('player-command', 'previous')
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: 'Mostrar reproductor',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          mainWindow.show()
+          mainWindow.focus()
+        }
+      }
+    },
+    {
+      label: 'Salir',
+      click: () => {
+        app.isQuitting = true
+        app.quit()
+      }
+    }
+  ])
+
+  tray.setContextMenu(contextMenu)
+}
+
+function setupMusicDirectoryWatcher(dir) {
+  if (dirWatcher) {
+    try { dirWatcher.close() } catch (_) {}
+    dirWatcher = null
+  }
+  if (!dir || !fs.existsSync(dir)) return
+
+  try {
+    dirWatcher = fs.watch(dir, { recursive: true }, (eventType, filename) => {
+      if (!filename) return
+      const base = path.basename(filename)
+      if (base.startsWith('.') || base.endsWith('.tmp') || base.endsWith('.crdownload')) return
+
+      if (watcherDebounceTimer) clearTimeout(watcherDebounceTimer)
+      watcherDebounceTimer = setTimeout(async () => {
+        watcherDebounceTimer = null
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        try {
+          const userDataDir = app.getPath('userData')
+          const updatedTree = await scanMusicDirectory(dir, userDataDir)
+          mainWindow.webContents.send('library-updated', updatedTree)
+          console.log('[Watcher] Biblioteca sincronizada automáticamente tras cambios en disco.')
+        } catch (err) {
+          console.warn('[Watcher] Error al actualizar tras cambios en disco:', err.message)
+        }
+      }, 1500)
+    })
+  } catch (err) {
+    console.warn('[Watcher] No se pudo iniciar el observador de la carpeta:', err.message)
+  }
 }
 
 function createMainWindow() {
@@ -420,7 +543,7 @@ function scheduleNextEdgeCheck(delay = 32) {
 
 function checkEdgeProximity() {
   if (!sidePanel || sidePanel.isDestroyed() || !isSidePanelReady) {
-    scheduleNextEdgeCheck(120)
+    scheduleNextEdgeCheck(200)
     return
   }
 
@@ -461,7 +584,7 @@ function checkEdgeProximity() {
     setSidePanelIgnoreMouse(!(inDrawer || inExpandedMarker))
 
     const nearPanelSeam = Math.abs(point.x - drawerLeft) <= 70
-    scheduleNextEdgeCheck(nearPanelSeam ? 28 : 120)
+    scheduleNextEdgeCheck(nearPanelSeam ? 28 : 160)
     return
   }
 
@@ -495,7 +618,18 @@ function checkEdgeProximity() {
     }
 
     setSidePanelIgnoreMouse(true)
-    scheduleNextEdgeCheck(distanceToRight <= 220 ? 32 : 110)
+    // Polling adaptable: conserva máxima fluidez cerca del borde, pero ahorra CPU cuando el cursor está lejos
+    let adaptiveDelay = 32
+    if (distanceToRight > 500) {
+      adaptiveDelay = 400
+    } else if (distanceToRight > 250) {
+      adaptiveDelay = 200
+    } else if (distanceToRight > 80) {
+      adaptiveDelay = 90
+    } else {
+      adaptiveDelay = 32
+    }
+    scheduleNextEdgeCheck(adaptiveDelay)
     return
   }
 
@@ -661,6 +795,7 @@ ipcMain.handle('scan-music', async (_, selectedDirectory) => {
   const musicDir = selectedDirectory || await getMusicDirectory()
   const userDataDir = app.getPath('userData')
   console.log(`[Biblioteca] Escaneando música desde: ${musicDir}`)
+  setupMusicDirectoryWatcher(musicDir)
   try {
     const library = await scanMusicDirectory(musicDir, userDataDir)
     console.log(`[Biblioteca] ${library.length} álbumes indexados correctamente.`)
@@ -782,6 +917,170 @@ ipcMain.handle('get-track-properties', async (_, filePath) => {
   } catch (err) {
     console.error('Error obteniendo propiedades de pista:', err.message)
     return null
+  }
+})
+
+ipcMain.handle('update-track-tags', async (_, { filePath, title, artist, album, selectedDirectory }) => {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { success: false, error: 'El archivo de música no existe en disco' }
+  }
+
+  const normalizedPath = path.normalize(filePath)
+  try {
+    const ext = path.extname(normalizedPath).toLowerCase()
+    if (ext === '.mp3') {
+      const tags = {}
+      if (typeof title === 'string') tags.title = title.trim()
+      if (typeof artist === 'string') tags.artist = artist.trim()
+      if (typeof album === 'string') tags.album = album.trim()
+      NodeID3.update(tags, normalizedPath)
+    }
+
+    removeFromMetadataCache(normalizedPath)
+    removeFromMetadataCache(filePath)
+
+    const musicDir = selectedDirectory || (await getMusicDirectory())
+    const userDataDir = app.getPath('userData')
+    const library = await scanMusicDirectory(musicDir, userDataDir)
+
+    return {
+      success: true,
+      library,
+      updatedTrack: {
+        path: normalizedPath,
+        title: title ? title.trim() : path.parse(normalizedPath).name,
+        artist: artist ? artist.trim() : 'Artista Desconocido',
+        album: album ? album.trim() : null
+      }
+    }
+  } catch (err) {
+    console.error('Error actualizando etiquetas ID3:', err)
+    return { success: false, error: err.message || 'Error al guardar los cambios en el archivo' }
+  }
+})
+
+/**
+ * Parsea el contenido en formato LRC (marcas de tiempo [mm:ss.xx]) o texto plano.
+ * Retorna { synced: boolean, lines: Array<{ time: number, text: string }> }
+ */
+function parseLrcText(content) {
+  if (!content || typeof content !== 'string') return { synced: false, lines: [] }
+  const cleanContent = content.replace(/^\uFEFF/, '')
+  const rawLines = cleanContent.split(/\r?\n/)
+  const parsedLines = []
+  const timeRegex = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g
+
+  let hasTimestamp = false
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.trim()
+    if (!line) continue
+
+    // Ignorar etiquetas de metadata como [ti:], [ar:], [al:], etc.
+    if (/^\[(ti|ar|al|by|offset|length|re|ve):/i.test(line)) {
+      continue
+    }
+
+    const matches = [...line.matchAll(timeRegex)]
+    if (matches.length > 0) {
+      hasTimestamp = true
+      const text = line.replace(timeRegex, '').trim()
+      for (const match of matches) {
+        const min = parseInt(match[1], 10)
+        const sec = parseInt(match[2], 10)
+        const msStr = match[3] || '0'
+        let ms = 0
+        if (msStr.length === 1) ms = parseInt(msStr, 10) * 100
+        else if (msStr.length === 2) ms = parseInt(msStr, 10) * 10
+        else ms = parseInt(msStr.slice(0, 3), 10)
+
+        const time = min * 60 + sec + ms / 1000
+        parsedLines.push({ time, text: text || '♪' })
+      }
+    }
+  }
+
+  if (hasTimestamp && parsedLines.length > 0) {
+    parsedLines.sort((a, b) => a.time - b.time)
+    return { synced: true, lines: parsedLines }
+  }
+
+  // Letra sin sincronización (texto plano)
+  const plainLines = rawLines
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && !/^\[(ti|ar|al|by|offset|length):/i.test(l))
+    .map((text, idx) => ({ time: idx, text }))
+
+  return { synced: false, lines: plainLines }
+}
+
+ipcMain.handle('get-track-lyrics', async (_, filePath) => {
+  if (!filePath || typeof filePath !== 'string') return { synced: false, lines: [] }
+  try {
+    const normalizedPath = path.normalize(filePath)
+    const dir = path.dirname(normalizedPath)
+    const baseName = path.parse(normalizedPath).name
+
+    // 1. Buscar archivo .lrc o .txt externo en el mismo directorio
+    const candidateFiles = [
+      path.join(dir, `${baseName}.lrc`),
+      path.join(dir, `${baseName}.LRC`),
+      path.join(dir, `${baseName}.txt`)
+    ]
+
+    for (const candidate of candidateFiles) {
+      if (fs.existsSync(candidate)) {
+        try {
+          const content = await fs.promises.readFile(candidate, 'utf-8')
+          const parsed = parseLrcText(content)
+          if (parsed.lines.length > 0) {
+            return { ...parsed, source: 'lrc' }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 2. Metadatos ID3 usando NodeID3 (MP3)
+    const ext = path.extname(normalizedPath).toLowerCase()
+    if (ext === '.mp3') {
+      try {
+        const tags = NodeID3.read(normalizedPath)
+        if (tags?.synchronisedLyrics && Array.isArray(tags.synchronisedLyrics) && tags.synchronisedLyrics.length > 0) {
+          const lines = tags.synchronisedLyrics.map(item => ({
+            time: (item.timeStamp || 0) / 1000,
+            text: (item.text || '').trim() || '♪'
+          })).filter(l => Boolean(l.text))
+          if (lines.length > 0) {
+            lines.sort((a, b) => a.time - b.time)
+            return { synced: true, lines, source: 'id3-sylt' }
+          }
+        }
+        const rawUnsynced = tags?.unsynchronisedLyrics?.text || tags?.unsynchronisedLyrics
+        if (typeof rawUnsynced === 'string' && rawUnsynced.trim()) {
+          const parsed = parseLrcText(rawUnsynced)
+          if (parsed.lines.length > 0) {
+            return { ...parsed, source: 'id3-uslt' }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. Respaldo: parseFile de music-metadata (FLAC, M4A, OGG, WAV, etc.)
+    try {
+      const parsed = await parseFile(normalizedPath, { skipCovers: true })
+      if (parsed?.common?.lyrics && Array.isArray(parsed.common.lyrics) && parsed.common.lyrics.length > 0) {
+        const text = parsed.common.lyrics.join('\n')
+        const parsedLyrics = parseLrcText(text)
+        if (parsedLyrics.lines.length > 0) {
+          return { ...parsedLyrics, source: 'metadata' }
+        }
+      }
+    } catch (_) {}
+
+    return { synced: false, lines: [] }
+  } catch (err) {
+    console.error('Error obteniendo letras de pista:', err)
+    return { synced: false, lines: [] }
   }
 })
 
@@ -1069,6 +1368,8 @@ ipcMain.on('player-state-update', (event, state) => {
     mainWindow.webContents.send('player-state-sync', state)
   }
 
+  updateTrayMenu()
+
   if (state && state.currentTrack && state.isPlaying) {
     if (state.currentTrack.id !== lastTrackId) {
       lastTrackId = state.currentTrack.id
@@ -1146,6 +1447,7 @@ app.whenReady().then(() => {
 
   createMainWindow()
   createSidePanel()
+  createTray()
   // createNotificationWindow() se carga bajo demanda al sonar la primera pista (ahorra ~90MB RAM al inicio)
   startEdgeDetection()
 
@@ -1182,6 +1484,14 @@ app.whenReady().then(() => {
 })
 
 app.on('will-quit', () => {
+  if (dirWatcher) {
+    try { dirWatcher.close() } catch (_) {}
+    dirWatcher = null
+  }
+  if (tray && !tray.isDestroyed()) {
+    try { tray.destroy() } catch (_) {}
+    tray = null
+  }
   if (edgeCheckTimeout) clearTimeout(edgeCheckTimeout)
   if (hideMarkerTimeout) clearTimeout(hideMarkerTimeout)
   if (minimizeDeferTimeout) clearTimeout(minimizeDeferTimeout)

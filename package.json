@@ -55,7 +55,8 @@
     }
   },
   "dependencies": {
-    "music-metadata": "^10.6.1"
+    "music-metadata": "^10.6.1",
+    "node-id3": "^0.2.9"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",

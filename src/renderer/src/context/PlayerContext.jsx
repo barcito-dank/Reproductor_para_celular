@@ -1,8 +1,22 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { getTrackUniqueKey, TODOS_ALBUM_COVER } from '../utils/trackUtils'
 
+const LibraryContext = createContext(null)
+const PlaybackContext = createContext(null)
 const PlayerContext = createContext(null)
 const PlayerTimeContext = createContext({ currentTime: 0 })
+
+export const EQ_FREQUENCIES = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000]
+
+export const EQ_PRESETS = {
+  'Plano': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  'Bass Boost': [7, 6, 4, 2, 0, 0, 0, 0, 1, 1],
+  'Rock': [5, 3, -1, -2, -1, 1, 3, 4, 4, 3],
+  'Pop': [-1, -1, 0, 2, 4, 4, 2, 0, -1, -1],
+  'Vocal': [-2, -1, -1, 1, 3, 4, 3, 2, 1, 0],
+  'Club / Dance': [6, 4, 2, 0, -2, 2, 3, 4, 4, 3],
+  'Agudos': [-2, -2, -1, 0, 0, 2, 4, 6, 7, 8]
+}
 
 const SESSION_STORAGE_KEY = 'musicPlayerSessionState'
 
@@ -147,6 +161,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
             ...track,
             uniqueKey,
             cover,
+            albumObj: album,
             albumName: album.name,
             albumIds: membership ? membership.albumIds : [album.id],
             albumNames: membership ? membership.albumNames : [album.name],
@@ -179,6 +194,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       tracks
     }
   }, [allAlbums, songAlbumsMap])
+
+  // Pistas deduplicadas memorizadas para SpotlightSearch y vistas rápidas
+  const allTracks = useMemo(() => allTracksAlbum?.tracks || [], [allTracksAlbum])
 
   // Biblioteca final incluyendo el álbum "Todos" al principio
   const library = useMemo(() => {
@@ -320,10 +338,37 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   const playedInCycleRef = useRef(new Set())
   const shufflePlaylistRef = useRef(null)
 
-  // Web Audio API para análisis de espectro en tiempo real
+  // Web Audio API para análisis de espectro en tiempo real y ecualizador paramétrico de 10 bandas
   const audioContextRef = useRef(null)
   const analyserRef = useRef(null)
   const sourceNodeRef = useRef(null)
+  const eqFiltersRef = useRef([])
+
+  // Estado persistente del ecualizador
+  const [eqState, setEqState] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem('musicPlayerEqSettings')
+      if (saved) return JSON.parse(saved)
+    } catch (_) {}
+    return {
+      enabled: false,
+      preset: 'Plano',
+      gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    }
+  })
+
+  const updateFilterGains = useCallback((gains, enabled) => {
+    if (!eqFiltersRef.current || eqFiltersRef.current.length === 0) return
+    const ctxTime = audioContextRef.current?.currentTime || 0
+    eqFiltersRef.current.forEach((filter, i) => {
+      const targetGain = enabled ? (gains[i] ?? 0) : 0
+      try {
+        filter.gain.setTargetAtTime(targetGain, ctxTime, 0.02)
+      } catch (_) {
+        filter.gain.value = targetGain
+      }
+    })
+  }, [])
 
   const initAudioAnalyser = useCallback(() => {
     if (isMiniPanel) return null
@@ -345,12 +390,37 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       analyser.maxDecibels = -15 // Rango superior con pegada y dinamismo visual
 
       const source = ctx.createMediaElementSource(audioRef.current)
-      source.connect(analyser)
+
+      // Cadena de 10 filtros paramétricos para el ecualizador
+      const filters = EQ_FREQUENCIES.map((freq, i) => {
+        const filter = ctx.createBiquadFilter()
+        if (i === 0) {
+          filter.type = 'lowshelf'
+        } else if (i === EQ_FREQUENCIES.length - 1) {
+          filter.type = 'highshelf'
+        } else {
+          filter.type = 'peaking'
+          filter.Q.value = 1.4
+        }
+        filter.frequency.value = freq
+        const initialGain = eqState.enabled ? (eqState.gains[i] ?? 0) : 0
+        filter.gain.value = initialGain
+        return filter
+      })
+
+      // Conexión en cascada: source -> filter[0] -> ... -> filter[9] -> analyser -> ctx.destination
+      let prevNode = source
+      for (const filter of filters) {
+        prevNode.connect(filter)
+        prevNode = filter
+      }
+      prevNode.connect(analyser)
       analyser.connect(ctx.destination)
 
       audioContextRef.current = ctx
       analyserRef.current = analyser
       sourceNodeRef.current = source
+      eqFiltersRef.current = filters
 
       if (ctx.state === 'suspended') {
         ctx.resume().catch(console.error)
@@ -358,10 +428,64 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
       return analyser
     } catch (e) {
-      console.warn('Web Audio API analyser init:', e.message)
+      console.warn('Web Audio API analyser & EQ init:', e.message)
       return analyserRef.current
     }
-  }, [isMiniPanel])
+  }, [isMiniPanel, eqState.enabled, eqState.gains])
+
+  const setEqBandGain = useCallback((bandIndex, gainDb) => {
+    setEqState((prev) => {
+      const nextGains = [...prev.gains]
+      nextGains[bandIndex] = Math.max(-12, Math.min(12, Math.round(gainDb * 10) / 10))
+      const nextState = { ...prev, preset: 'Personalizado', gains: nextGains }
+      try {
+        window.localStorage.setItem('musicPlayerEqSettings', JSON.stringify(nextState))
+      } catch (_) {}
+      updateFilterGains(nextGains, nextState.enabled)
+      return nextState
+    })
+  }, [updateFilterGains])
+
+  const applyEqPreset = useCallback((presetName) => {
+    const presetGains = EQ_PRESETS[presetName] || EQ_PRESETS['Plano']
+    setEqState((prev) => {
+      const nextState = { ...prev, preset: presetName, gains: [...presetGains] }
+      try {
+        window.localStorage.setItem('musicPlayerEqSettings', JSON.stringify(nextState))
+      } catch (_) {}
+      updateFilterGains(presetGains, nextState.enabled)
+      return nextState
+    })
+  }, [updateFilterGains])
+
+  const toggleEqEnabled = useCallback(() => {
+    setEqState((prev) => {
+      const nextEnabled = !prev.enabled
+      const nextState = { ...prev, enabled: nextEnabled }
+      try {
+        window.localStorage.setItem('musicPlayerEqSettings', JSON.stringify(nextState))
+      } catch (_) {}
+      updateFilterGains(nextState.gains, nextEnabled)
+      return nextState
+    })
+  }, [updateFilterGains])
+
+  const resetEq = useCallback(() => {
+    const flatGains = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    setEqState({
+      enabled: true,
+      preset: 'Plano',
+      gains: flatGains
+    })
+    try {
+      window.localStorage.setItem('musicPlayerEqSettings', JSON.stringify({
+        enabled: true,
+        preset: 'Plano',
+        gains: flatGains
+      }))
+    } catch (_) {}
+    updateFilterGains(flatGains, true)
+  }, [updateFilterGains])
 
   // Barajado uniforme Fisher-Yates de índices candidatos
   const buildShuffledIndices = useCallback((list, excludeIds = new Set(), avoidRecentIds = new Set()) => {
@@ -536,6 +660,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (audioRef.current) {
       audioRef.current.volume = clamped
     }
+  }, [])
+
+  // Ajuste relativo de volumen
+  const adjustVolume = useCallback((delta) => {
+    setVolume((prev) => {
+      const next = Math.max(0, Math.min(1, Math.round(((prev ?? 0.8) + delta) * 100) / 100))
+      if (audioRef.current) {
+        audioRef.current.volume = next
+      }
+      return next
+    })
   }, [])
 
   // Alternar modo aleatorio (reinicia la bolsa barajada con las canciones aún no reproducidas)
@@ -735,6 +870,16 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       if (now - lastTimeSyncRef.current >= 250) {
         lastTimeSyncRef.current = now
         window.electronAPI.sendPlayerTime?.(t)
+        // Sincronizar posición con Windows SMTC / auriculares
+        if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && audio.duration) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: audio.duration,
+              playbackRate: 1,
+              position: Math.min(audio.duration, Math.max(0, t))
+            })
+          } catch (_) {}
+        }
       }
       // Guardar progreso de sesión de forma espaciada (~2s) para no sobrecargar localStorage
       if (now - lastSessionSaveAtRef.current >= 2000) {
@@ -828,6 +973,82 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       })
     }
   }, [isMiniPanel, isLoading, currentTrack, currentAlbum, playlist, playlistIndex, isPlaying, duration, shuffle, loop, volume])
+
+  // Sincronización nativa con Media Session API (SMTC de Windows 10/11 y controles Bluetooth de auriculares)
+  useEffect(() => {
+    if (isMiniPanel || !('mediaSession' in navigator)) return
+
+    if (currentTrack) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.title || 'Canción',
+        artist: currentTrack.artist || 'Artista Desconocido',
+        album: currentAlbum?.name || currentTrack.albumName || '',
+        artwork: currentTrack.cover
+          ? [
+              { src: currentTrack.cover, sizes: '96x96' },
+              { src: currentTrack.cover, sizes: '128x128' },
+              { src: currentTrack.cover, sizes: '256x256' },
+              { src: currentTrack.cover, sizes: '512x512' }
+            ]
+          : []
+      })
+    } else {
+      navigator.mediaSession.metadata = null
+    }
+  }, [isMiniPanel, currentTrack, currentAlbum])
+
+  useEffect(() => {
+    if (isMiniPanel || !('mediaSession' in navigator)) return
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+  }, [isMiniPanel, isPlaying])
+
+  useEffect(() => {
+    if (isMiniPanel || !('mediaSession' in navigator)) return
+
+    const handlers = [
+      ['play', () => togglePlay()],
+      ['pause', () => togglePlay()],
+      ['previoustrack', () => previousTrack()],
+      ['nexttrack', () => nextTrack()],
+      ['seekto', (details) => {
+        if (details.seekTime != null) seekTo(details.seekTime)
+      }],
+      ['seekbackward', (details) => {
+        const skip = details.seekOffset || 10
+        seekTo(Math.max(0, (audioRef.current?.currentTime || 0) - skip))
+      }],
+      ['seekforward', (details) => {
+        const skip = details.seekOffset || 10
+        seekTo(Math.min(duration || 0, (audioRef.current?.currentTime || 0) + skip))
+      }]
+    ]
+
+    for (const [action, handler] of handlers) {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler)
+      } catch (_) {}
+    }
+
+    return () => {
+      for (const [action] of handlers) {
+        try {
+          navigator.mediaSession.setActionHandler(action, null)
+        } catch (_) {}
+      }
+    }
+  }, [isMiniPanel, togglePlay, previousTrack, nextTrack, seekTo, duration])
+
+  // Escuchar cambios automáticos en la carpeta de música (Folder Watcher del backend)
+  useEffect(() => {
+    if (isMiniPanel || !window.electronAPI?.onLibraryUpdated) return
+    const unsub = window.electronAPI.onLibraryUpdated((updatedTree) => {
+      console.log('[Watcher] Biblioteca sincronizada automáticamente.')
+      if (Array.isArray(updatedTree)) {
+        setRawLibrary(updatedTree)
+      }
+    })
+    return () => unsub()
+  }, [isMiniPanel])
 
   // Cargar estado inicial si estamos en la ventana Mini Panel
   useEffect(() => {
@@ -1029,6 +1250,136 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       return { success: false, error: err.message }
     }
   }, [currentTrack, playlist, playlistIndex, musicDirectory])
+
+  // Quitar una canción de un álbum específico (eliminando la copia física de la carpeta de ese álbum)
+  const removeTrackFromAlbum = useCallback(async (track, targetAlbum) => {
+    if (!track || !targetAlbum) return { success: false, error: 'Parámetros inválidos' }
+    try {
+      const info = getTrackAlbumInfo(track)
+      const targetAlbumPath = (targetAlbum.path || '').replace(/\\/g, '/').toLowerCase()
+      const targetAlbumId = targetAlbum.id
+
+      // 1. Buscar la copia exacta en ese álbum a través de copies
+      const copy = (info?.copies || []).find((c) => {
+        if (c.albumId && targetAlbumId && c.albumId === targetAlbumId) return true
+        if (c.albumPath && targetAlbumPath) {
+          const normCopyPath = c.albumPath.replace(/\\/g, '/').toLowerCase()
+          return normCopyPath === targetAlbumPath
+        }
+        return false
+      })
+
+      let trackToDelete = copy?.track
+
+      // 2. Si no se encontró en info.copies, buscar en los tracks cargados del álbum destino
+      if (!trackToDelete && targetAlbum.tracks) {
+        const uniqueKey = track.uniqueKey || getTrackUniqueKey(track)
+        trackToDelete = targetAlbum.tracks.find((t) => {
+          const tKey = t.uniqueKey || getTrackUniqueKey(t)
+          if (tKey && uniqueKey && tKey === uniqueKey) return true
+          if (t.id === track.id) return true
+          if (t.path && track.path && t.path.replace(/\\/g, '/').toLowerCase() === track.path.replace(/\\/g, '/').toLowerCase()) return true
+          return false
+        })
+      }
+
+      // 3. Si aún no se encontró, verificar si la ruta de track.path pertenece a targetAlbum.path
+      if (!trackToDelete && track.path && targetAlbumPath) {
+        const normTrackPath = track.path.replace(/\\/g, '/').toLowerCase()
+        if (normTrackPath.startsWith(targetAlbumPath)) {
+          trackToDelete = track
+        }
+      }
+
+      // 4. Si coincide por nombre de archivo dentro de la carpeta del álbum destino
+      if (!trackToDelete && targetAlbum.path && track.path) {
+        const fileName = track.path.split(/[\\/]/).pop()
+        if (fileName && targetAlbum.tracks) {
+          trackToDelete = targetAlbum.tracks.find((t) => {
+            const tFile = (t.path || '').split(/[\\/]/).pop()
+            return tFile && fileName && tFile.toLowerCase() === fileName.toLowerCase()
+          })
+        }
+      }
+
+      // 5. Fallback si es el único álbum restante y tenemos la pista
+      if (!trackToDelete && track.path) {
+        trackToDelete = track
+      }
+
+      if (!trackToDelete || !trackToDelete.path) {
+        return { success: false, error: 'No se encontró el archivo de la pista en el álbum indicado' }
+      }
+
+      return await deleteTrackFromDisk(trackToDelete)
+    } catch (err) {
+      console.error('Error al quitar canción del álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [getTrackAlbumInfo, deleteTrackFromDisk])
+
+  // Eliminar una canción de TODOS los álbumes donde exista (todas sus copias físicas en disco)
+  const deleteTrackFromAllAlbums = useCallback(async (track) => {
+    if (!track) return { success: false }
+    try {
+      const info = getTrackAlbumInfo(track)
+      const copies = info?.copies || []
+
+      // Recopilar todas las rutas únicas a eliminar
+      const pathsToDelete = new Set()
+      if (track.path) pathsToDelete.add(track.path)
+      for (const copy of copies) {
+        if (copy.track?.path) pathsToDelete.add(copy.track.path)
+      }
+
+      // Si la pista que se está reproduciendo coincide con alguna de las copias
+      const audio = audioRef.current
+      const isCurrentlyPlaying = currentTrack && (
+        currentTrack.id === track.id ||
+        pathsToDelete.has(currentTrack.path) ||
+        copies.some((c) => c.track?.id === currentTrack.id)
+      )
+
+      if (isCurrentlyPlaying) {
+        const remaining = playlist.filter((t) => !pathsToDelete.has(t.path) && t.id !== track.id)
+        audio.pause()
+        setIsPlaying(false)
+        audio.removeAttribute('src')
+        audio.load()
+        if (remaining.length > 0) {
+          const nextIdx = Math.min(Math.max(0, playlistIndex), remaining.length - 1)
+          const replacement = remaining[nextIdx]
+          setCurrentTrack(replacement)
+          setPlaylist(remaining)
+          setPlaylistIndex(nextIdx)
+          audio.src = resolveAudioSrc(replacement)
+        } else {
+          setCurrentTrack(null)
+          setPlaylist([])
+          setPlaylistIndex(-1)
+          setCurrentTime(0)
+          setDuration(0)
+        }
+      }
+
+      let lastResult = { success: true }
+      for (const filePath of pathsToDelete) {
+        lastResult = await window.electronAPI.deleteTrackFile({
+          filePath,
+          selectedDirectory: musicDirectory || undefined
+        })
+      }
+
+      if (lastResult && lastResult.success && Array.isArray(lastResult.library)) {
+        setRawLibrary(lastResult.library)
+      }
+
+      return lastResult || { success: true }
+    } catch (err) {
+      console.error('Error al eliminar pista de todos los álbumes:', err)
+      return { success: false, error: err.message }
+    }
+  }, [getTrackAlbumInfo, currentTrack, playlist, playlistIndex, musicDirectory])
 
   // Crear un nuevo álbum (carpeta) en la biblioteca y seleccionarlo automáticamente
   const createAlbum = useCallback(async (albumName, parentDir = null) => {
@@ -1276,57 +1627,85 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [musicDirectory, currentTrack, selectedAlbum])
 
-  // Contexto principal memoizado: solo cambia cuando cambian datos reales de pista, biblioteca o controles
-  // currentTime NO está en estas dependencias, por lo que AlbumView, Sidebar, etc. no se re-renderizan
-  const playerValue = useMemo(() => ({
+  // Editar información y etiquetas de una canción (Tag Editor ID3)
+  const updateTrackTags = useCallback(async (track, newTags) => {
+    if (!track?.path || !window.electronAPI?.updateTrackTags) {
+      return { success: false, error: 'Ruta no válida o API no disponible' }
+    }
+    try {
+      const res = await window.electronAPI.updateTrackTags({
+        filePath: track.path,
+        title: newTags.title,
+        artist: newTags.artist,
+        album: newTags.album,
+        selectedDirectory: musicDirectory || undefined
+      })
+      if (res && res.success) {
+        if (Array.isArray(res.library)) {
+          setRawLibrary(res.library)
+        }
+        if (currentTrack && (currentTrack.id === track.id || currentTrack.path === track.path)) {
+          setCurrentTrack((prev) => ({
+            ...prev,
+            title: newTags.title ? newTags.title.trim() : prev.title,
+            artist: newTags.artist ? newTags.artist.trim() : prev.artist
+          }))
+        }
+      }
+      return res || { success: false }
+    } catch (err) {
+      console.error('Error al actualizar tags ID3:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory, currentTrack])
+
+  // Contexto de Biblioteca (cambia únicamente al escanear, crear/mover álbumes o seleccionar álbum)
+  // Al aislarlo, componentes como Sidebar NO se re-renderizan con cambios de volumen, tiempo o play/pause
+  const libraryValue = useMemo(() => ({
     library,
     allAlbums,
+    allTracks,
     songAlbumsMap,
     getTrackAlbumInfo,
     addTrackToAlbums,
+    removeTrackFromAlbum,
     deleteTrackFromDisk,
+    deleteTrackFromAllAlbums,
+    updateTrackTags,
     createAlbum,
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,
-    currentTrack,
-    currentAlbum,
-    playlist,
-    playlistIndex,
-    isPlaying,
-    duration,
-    volume,
-    shuffle,
-    loop,
-    isLoading,
     selectedAlbum,
     setSelectedAlbum,
+    isLoading,
     musicDirectory,
     updateMusicDirectory,
-    playTrack,
-    togglePlay,
-    nextTrack,
-    previousTrack,
-    seekTo,
-    setVolumeLevel,
-    toggleShuffle,
-    toggleLoop,
-    playAlbum,
-    loadLibrary,
-    analyserRef,
-    audioContextRef,
-    initAudioAnalyser
+    loadLibrary
   }), [
     library,
     allAlbums,
+    allTracks,
     songAlbumsMap,
     getTrackAlbumInfo,
     addTrackToAlbums,
+    removeTrackFromAlbum,
     deleteTrackFromDisk,
+    deleteTrackFromAllAlbums,
+    updateTrackTags,
     createAlbum,
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,
+    selectedAlbum,
+    isLoading,
+    musicDirectory,
+    updateMusicDirectory,
+    loadLibrary
+  ])
+
+  // Contexto de Reproducción (controles de audio, pista actual, cola, volumen y ecualizador)
+  const playbackValue = useMemo(() => ({
     currentTrack,
     currentAlbum,
     playlist,
@@ -1336,23 +1715,59 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     volume,
     shuffle,
     loop,
-    isLoading,
-    selectedAlbum,
-    setSelectedAlbum,
-    musicDirectory,
-    updateMusicDirectory,
     playTrack,
     togglePlay,
     nextTrack,
     previousTrack,
     seekTo,
     setVolumeLevel,
+    adjustVolume,
     toggleShuffle,
     toggleLoop,
     playAlbum,
-    loadLibrary,
-    initAudioAnalyser
+    analyserRef,
+    audioContextRef,
+    initAudioAnalyser,
+    eqState,
+    setEqBandGain,
+    applyEqPreset,
+    toggleEqEnabled,
+    resetEq,
+    EQ_FREQUENCIES,
+    EQ_PRESETS
+  }), [
+    currentTrack,
+    currentAlbum,
+    playlist,
+    playlistIndex,
+    isPlaying,
+    duration,
+    volume,
+    shuffle,
+    loop,
+    playTrack,
+    togglePlay,
+    nextTrack,
+    previousTrack,
+    seekTo,
+    setVolumeLevel,
+    adjustVolume,
+    toggleShuffle,
+    toggleLoop,
+    playAlbum,
+    initAudioAnalyser,
+    eqState,
+    setEqBandGain,
+    applyEqPreset,
+    toggleEqEnabled,
+    resetEq
   ])
+
+  // Contexto combinado para compatibilidad total con usePlayer()
+  const playerValue = useMemo(() => ({
+    ...libraryValue,
+    ...playbackValue
+  }), [libraryValue, playbackValue])
 
   // Contexto de tiempo de alta frecuencia: solo suscriben los componentes que dibujan el progreso
   const timeValue = useMemo(() => ({
@@ -1360,12 +1775,32 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   }), [currentTime])
 
   return (
-    <PlayerContext.Provider value={playerValue}>
-      <PlayerTimeContext.Provider value={timeValue}>
-        {children}
-      </PlayerTimeContext.Provider>
-    </PlayerContext.Provider>
+    <LibraryContext.Provider value={libraryValue}>
+      <PlaybackContext.Provider value={playbackValue}>
+        <PlayerContext.Provider value={playerValue}>
+          <PlayerTimeContext.Provider value={timeValue}>
+            {children}
+          </PlayerTimeContext.Provider>
+        </PlayerContext.Provider>
+      </PlaybackContext.Provider>
+    </LibraryContext.Provider>
   )
+}
+
+export function useLibrary() {
+  const context = useContext(LibraryContext)
+  if (!context) {
+    throw new Error('useLibrary debe usarse dentro de PlayerProvider')
+  }
+  return context
+}
+
+export function usePlayback() {
+  const context = useContext(PlaybackContext)
+  if (!context) {
+    throw new Error('usePlayback debe usarse dentro de PlayerProvider')
+  }
+  return context
 }
 
 export function usePlayer() {
