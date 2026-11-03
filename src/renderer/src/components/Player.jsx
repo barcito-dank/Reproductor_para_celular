@@ -396,7 +396,20 @@ function Player() {
         {/* 1. Track Info (Carátula grande, título, artista) */}
       <div className="player-track-info">
         {currentTrack?.cover ? (
-          <img src={currentTrack.cover} alt="" className="player-cover" decoding="async" />
+          <>
+            <img
+              src={currentTrack.cover}
+              alt=""
+              className="player-cover"
+              decoding="async"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+                const fb = e.currentTarget.parentElement?.querySelector('.player-cover-placeholder')
+                if (fb) fb.style.display = 'flex'
+              }}
+            />
+            <div className="player-cover-placeholder" style={{ display: 'none' }}>💿</div>
+          </>
         ) : (
           <div className="player-cover-placeholder">💿</div>
         )}

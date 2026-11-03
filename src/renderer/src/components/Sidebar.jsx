@@ -161,14 +161,22 @@ const TreeNode = React.memo(function TreeNode({
       title={isAllTracks ? 'Colección completa de todas las canciones' : `${node.name} (${node.trackCount} pistas)`}
     >
       {node.cover ? (
-        <img
-          src={node.cover}
-          alt={node.name}
-          className="album-item-cover"
-          loading="lazy"
-          decoding="async"
-          draggable={false}
-        />
+        <>
+          <img
+            src={node.cover}
+            alt={node.name}
+            className="album-item-cover"
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            onError={(e) => {
+              e.currentTarget.style.display = 'none'
+              const fb = e.currentTarget.parentElement?.querySelector('.album-item-cover-placeholder')
+              if (fb) fb.style.display = 'flex'
+            }}
+          />
+          <div className="album-item-cover-placeholder" style={{ display: 'none' }}>{isAllTracks ? '✨' : '💿'}</div>
+        </>
       ) : (
         <div className="album-item-cover-placeholder">{isAllTracks ? '✨' : '💿'}</div>
       )}

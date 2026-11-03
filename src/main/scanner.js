@@ -18,20 +18,19 @@ function getDirHash(dirPath) {
 }
 
 function getPrimaryCachePath(baseDir, userDataDir) {
+  // Guarda el archivo de caché directamente en la carpeta de música (.library_cache.json)
+  return path.join(baseDir, '.library_cache.json')
+}
+
+function getLegacyCachePath(baseDir, userDataDir) {
   if (userDataDir) {
     return path.join(userDataDir, 'cache', `library_cache_${getDirHash(baseDir)}.json`)
   }
   return path.join(baseDir, '.library_cache.json')
 }
 
-function getLegacyCachePath(baseDir) {
-  return path.join(baseDir, '.library_cache.json')
-}
-
 function getSongAlbumsIndexPath(baseDir, userDataDir) {
-  if (userDataDir) {
-    return path.join(userDataDir, 'cache', `song_albums_${getDirHash(baseDir)}.json`)
-  }
+  // Guarda el índice de canciones en la carpeta de música (.song_albums_index.json)
   return path.join(baseDir, '.song_albums_index.json')
 }
 
@@ -81,16 +80,17 @@ function toFileUrl(filePath) {
 }
 
 /**
- * Asegura la existencia del subdirectorio de carátulas en userData (con fallback a baseDir/.covers)
+ * Asegura la existencia del subdirectorio de carátulas en baseDir/.covers (con fallback a userData/cache/covers)
  */
 async function ensureCoversDir(baseDir, userDataDir) {
   if (activeCoversDir) return activeCoversDir
 
-  const candidates = []
+  const candidates = [
+    path.join(baseDir, '.covers')
+  ]
   if (userDataDir) {
     candidates.push(path.join(userDataDir, 'cache', 'covers'))
   }
-  candidates.push(path.join(baseDir, '.covers'))
 
   for (const candidate of candidates) {
     try {
@@ -101,7 +101,10 @@ async function ensureCoversDir(baseDir, userDataDir) {
       try {
         const existingFiles = await fs.promises.readdir(candidate)
         for (const file of existingFiles) {
-          knownCovers.add(path.join(candidate, file))
+          const fullPath = path.join(candidate, file)
+          knownCovers.add(fullPath)
+          knownCovers.add(fullPath.toLowerCase())
+          knownCovers.add(fullPath.replace(/\\/g, '/').toLowerCase())
         }
       } catch (_) {}
 
@@ -126,17 +129,20 @@ async function saveCoverBuffer(baseDir, userDataDir, buffer, format) {
     const ext = format && format.toLowerCase().includes('png') ? '.png' : '.jpg'
     const fileName = `${hash}${ext}`
     const filePath = path.join(coversDir, fileName)
+    const normalizedKey = filePath.toLowerCase()
 
-    if (knownCovers.has(filePath)) {
+    if (knownCovers.has(filePath) || knownCovers.has(normalizedKey)) {
       return toFileUrl(filePath)
     }
 
     try {
       await fs.promises.access(filePath)
       knownCovers.add(filePath)
+      knownCovers.add(normalizedKey)
     } catch (_) {
       await fs.promises.writeFile(filePath, buffer)
       knownCovers.add(filePath)
+      knownCovers.add(normalizedKey)
     }
 
     return toFileUrl(filePath)
@@ -151,7 +157,7 @@ async function loadCache(baseDir, userDataDir) {
   if (loadedCacheKey === cacheKey) return
 
   const primaryFile = getPrimaryCachePath(baseDir, userDataDir)
-  const legacyFile = getLegacyCachePath(baseDir)
+  const legacyFile = getLegacyCachePath(baseDir, userDataDir)
   const candidates = primaryFile !== legacyFile ? [primaryFile, legacyFile] : [primaryFile]
 
   metadataCache = {}
@@ -173,7 +179,7 @@ async function loadCache(baseDir, userDataDir) {
 
 async function saveCache(baseDir, userDataDir) {
   const primaryFile = getPrimaryCachePath(baseDir, userDataDir)
-  const legacyFile = getLegacyCachePath(baseDir)
+  const legacyFile = getLegacyCachePath(baseDir, userDataDir)
   const candidates = primaryFile !== legacyFile ? [primaryFile, legacyFile] : [primaryFile]
 
   for (const cacheFile of candidates) {
@@ -239,10 +245,26 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
         let coverValid = true
         if (cached.embeddedCover && cached.embeddedCover.startsWith('file:')) {
           try {
-            const coverFilePath = fileURLToPath(cached.embeddedCover)
-            if (!knownCovers.has(coverFilePath)) {
-              await fs.promises.access(coverFilePath)
-              knownCovers.add(coverFilePath)
+            let coverFilePath = fileURLToPath(cached.embeddedCover)
+            const normalizedPath = coverFilePath.toLowerCase()
+            if (!knownCovers.has(coverFilePath) && !knownCovers.has(normalizedPath)) {
+              try {
+                await fs.promises.access(coverFilePath)
+                knownCovers.add(coverFilePath)
+                knownCovers.add(normalizedPath)
+              } catch (_) {
+                // Si la ruta anterior apuntaba a otro directorio, buscarla en baseDir/.covers
+                const localAlternative = path.join(baseDir, '.covers', path.basename(coverFilePath))
+                const normalizedLocal = localAlternative.toLowerCase()
+                if (knownCovers.has(localAlternative) || knownCovers.has(normalizedLocal)) {
+                  cached.embeddedCover = toFileUrl(localAlternative)
+                } else {
+                  await fs.promises.access(localAlternative)
+                  knownCovers.add(localAlternative)
+                  knownCovers.add(normalizedLocal)
+                  cached.embeddedCover = toFileUrl(localAlternative)
+                }
+              }
             }
           } catch (_) {
             coverValid = false

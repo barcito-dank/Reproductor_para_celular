@@ -119,7 +119,21 @@ const MiniTrackRow = React.memo(function MiniTrackRow({
       onClick={() => onSelect(index)}
     >
       {track.cover ? (
-        <img src={track.cover} alt="" className="mini-track-cover" loading="lazy" decoding="async" />
+        <>
+          <img
+            src={track.cover}
+            alt=""
+            className="mini-track-cover"
+            loading="lazy"
+            decoding="async"
+            onError={(e) => {
+              e.currentTarget.style.display = 'none'
+              const fb = e.currentTarget.parentElement?.querySelector('.mini-track-cover-placeholder')
+              if (fb) fb.style.display = 'flex'
+            }}
+          />
+          <div className="mini-track-cover-placeholder" style={{ display: 'none' }}>🎵</div>
+        </>
       ) : (
         <div className="mini-track-cover-placeholder">🎵</div>
       )}
@@ -449,7 +463,20 @@ function MiniPanel() {
         <div className="mini-now-playing">
           <div className={`mini-now-cover-wrap ${isPlaying && isExpanded ? 'playing' : ''}`}>
             {currentTrack?.cover ? (
-              <img src={currentTrack.cover} alt="" className="mini-now-cover" decoding="async" />
+              <>
+                <img
+                  src={currentTrack.cover}
+                  alt=""
+                  className="mini-now-cover"
+                  decoding="async"
+                  onError={(e) => {
+                    e.currentTarget.style.display = 'none'
+                    const fb = e.currentTarget.parentElement?.querySelector('.mini-now-cover-placeholder')
+                    if (fb) fb.style.display = 'flex'
+                  }}
+                />
+                <div className="mini-now-cover-placeholder" style={{ display: 'none' }}>💿</div>
+              </>
             ) : (
               <div className="mini-now-cover-placeholder">💿</div>
             )}

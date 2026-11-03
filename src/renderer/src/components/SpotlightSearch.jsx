@@ -156,7 +156,18 @@ function SpotlightSearch({ isOpen, onClose }) {
                   {/* Thumbnail de carátula */}
                   <div className="spotlight-item-cover">
                     {item.cover ? (
-                      <img src={item.cover} alt="" />
+                      <>
+                        <img
+                          src={item.cover}
+                          alt=""
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none'
+                            const fb = e.currentTarget.parentElement?.querySelector('.spotlight-cover-placeholder')
+                            if (fb) fb.style.display = 'flex'
+                          }}
+                        />
+                        <div className="spotlight-cover-placeholder" style={{ display: 'none' }}>💿</div>
+                      </>
                     ) : (
                       <div className="spotlight-cover-placeholder">💿</div>
                     )}

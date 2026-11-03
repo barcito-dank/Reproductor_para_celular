@@ -38,7 +38,19 @@ function ToastNotification() {
       <div className="toast-balloon-card">
         <div className="toast-balloon-cover">
           {track.cover ? (
-            <img src={track.cover} alt="" className="toast-balloon-cover-img" />
+            <>
+              <img
+                src={track.cover}
+                alt=""
+                className="toast-balloon-cover-img"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none'
+                  const fb = e.currentTarget.parentElement?.querySelector('.toast-balloon-placeholder')
+                  if (fb) fb.style.display = 'flex'
+                }}
+              />
+              <div className="toast-balloon-placeholder" style={{ display: 'none' }}>🎵</div>
+            </>
           ) : (
             <div className="toast-balloon-placeholder">🎵</div>
           )}

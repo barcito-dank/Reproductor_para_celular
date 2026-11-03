@@ -116,13 +116,21 @@ const TrackRow = React.memo(function TrackRow({
       {/* Miniatura de la Imagen de la Canción con Hover Play */}
       <div className="track-cover-container">
         {track.cover ? (
-          <img
-            src={track.cover}
-            alt=""
-            className="track-thumb-img"
-            loading="lazy"
-            decoding="async"
-          />
+          <>
+            <img
+              src={track.cover}
+              alt=""
+              className="track-thumb-img"
+              loading="lazy"
+              decoding="async"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+                const fb = e.currentTarget.parentElement?.querySelector('.track-thumb-fallback')
+                if (fb) fb.style.display = 'flex'
+              }}
+            />
+            <div className="track-thumb-fallback" style={{ display: 'none' }}>🎵</div>
+          </>
         ) : (
           <div className="track-thumb-fallback">🎵</div>
         )}
@@ -318,7 +326,20 @@ function AlbumMembershipPopover({
               </span>
 
               {alb.cover ? (
-                <img src={alb.cover} alt="" className="album-picker-thumb" loading="lazy" />
+                <>
+                  <img
+                    src={alb.cover}
+                    alt=""
+                    className="album-picker-thumb"
+                    loading="lazy"
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none'
+                      const fb = e.currentTarget.parentElement?.querySelector('.album-picker-thumb-fallback')
+                      if (fb) fb.style.display = 'flex'
+                    }}
+                  />
+                  <div className="album-picker-thumb-fallback" style={{ display: 'none' }}>💿</div>
+                </>
               ) : (
                 <div className="album-picker-thumb-fallback">💿</div>
               )}
@@ -602,7 +623,19 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
           <div className="track-modal-header">
             <div className="track-modal-title-group">
               {track.cover ? (
-                <img src={track.cover} alt="" className="track-modal-cover" />
+                <>
+                  <img
+                    src={track.cover}
+                    alt=""
+                    className="track-modal-cover"
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none'
+                      const fb = e.currentTarget.parentElement?.querySelector('.track-modal-cover-placeholder')
+                      if (fb) fb.style.display = 'flex'
+                    }}
+                  />
+                  <div className="track-modal-cover-placeholder" style={{ display: 'none' }}>🎵</div>
+                </>
               ) : (
                 <div className="track-modal-cover-placeholder">🎵</div>
               )}
@@ -1156,7 +1189,20 @@ function AlbumView() {
         <div className="album-cover-wrapper">
           <div className="album-cover-glow" style={{ backgroundImage: album.cover ? `url("${album.cover}")` : undefined }} />
           {album.cover ? (
-            <img src={album.cover} alt={album.name} className="album-cover-large" decoding="async" />
+            <>
+              <img
+                src={album.cover}
+                alt={album.name}
+                className="album-cover-large"
+                decoding="async"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none'
+                  const fb = e.currentTarget.parentElement?.querySelector('.album-cover-large-placeholder')
+                  if (fb) fb.style.display = 'flex'
+                }}
+              />
+              <div className="album-cover-large-placeholder" style={{ display: 'none' }}>💿</div>
+            </>
           ) : (
             <div className="album-cover-large-placeholder">💿</div>
           )}
