@@ -920,35 +920,56 @@ ipcMain.handle('get-track-properties', async (_, filePath) => {
   }
 })
 
-ipcMain.handle('update-track-tags', async (_, { filePath, title, artist, album, selectedDirectory }) => {
-  if (!filePath || !fs.existsSync(filePath)) {
-    return { success: false, error: 'El archivo de música no existe en disco' }
+ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, artist, album, selectedDirectory }) => {
+  const targetPaths = new Set()
+  if (Array.isArray(filePaths) && filePaths.length > 0) {
+    filePaths.forEach((p) => {
+      if (p && typeof p === 'string') targetPaths.add(p)
+    })
+  } else if (filePath) {
+    targetPaths.add(filePath)
   }
 
-  const normalizedPath = path.normalize(filePath)
-  try {
-    const ext = path.extname(normalizedPath).toLowerCase()
-    if (ext === '.mp3') {
-      const tags = {}
-      if (typeof title === 'string') tags.title = title.trim()
-      if (typeof artist === 'string') tags.artist = artist.trim()
-      if (typeof album === 'string') tags.album = album.trim()
-      NodeID3.update(tags, normalizedPath)
+  if (targetPaths.size === 0) {
+    return { success: false, error: 'No se proporcionaron rutas de archivo válidas' }
+  }
+
+  let updatedCount = 0
+  const tags = {}
+  if (typeof title === 'string') tags.title = title.trim()
+  if (typeof artist === 'string') tags.artist = artist.trim()
+  if (typeof album === 'string') tags.album = album.trim()
+
+  for (const rawPath of targetPaths) {
+    try {
+      if (!fs.existsSync(rawPath)) continue
+      const normalizedPath = path.normalize(rawPath)
+      const ext = path.extname(normalizedPath).toLowerCase()
+      if (ext === '.mp3') {
+        NodeID3.update(tags, normalizedPath)
+      }
+
+      removeFromMetadataCache(normalizedPath)
+      removeFromMetadataCache(rawPath)
+      updatedCount++
+    } catch (tagErr) {
+      console.warn(`Aviso al actualizar tags en ${rawPath}:`, tagErr.message)
     }
+  }
 
-    removeFromMetadataCache(normalizedPath)
-    removeFromMetadataCache(filePath)
-
+  try {
     const musicDir = selectedDirectory || (await getMusicDirectory())
     const userDataDir = app.getPath('userData')
     const library = await scanMusicDirectory(musicDir, userDataDir)
 
+    const primaryPath = filePath ? path.normalize(filePath) : Array.from(targetPaths)[0]
     return {
       success: true,
+      updatedCount,
       library,
       updatedTrack: {
-        path: normalizedPath,
-        title: title ? title.trim() : path.parse(normalizedPath).name,
+        path: primaryPath,
+        title: title ? title.trim() : path.parse(primaryPath).name,
         artist: artist ? artist.trim() : 'Artista Desconocido',
         album: album ? album.trim() : null
       }

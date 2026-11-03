@@ -146,7 +146,21 @@ const TrackRow = React.memo(function TrackRow({
         <div className="track-title-row">
           <div className="track-title" title={track.title}>{track.title}</div>
         </div>
-        <div className="track-artist" title={track.artist}>{track.artist}</div>
+        <div className="track-artist-row">
+          <div className="track-artist" title={track.artist}>{track.artist}</div>
+          {track.hasLyrics && (
+            <span
+              className={`track-lyrics-indicator ${track.syncedLyrics ? 'synced' : 'plain'}`}
+              title={track.syncedLyrics ? 'Letras sincronizadas disponibles' : 'Letras disponibles'}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="22" />
+              </svg>
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Botón de Marcador / Álbumes con casillas */}
@@ -205,15 +219,30 @@ function AlbumMembershipPopover({
     }
   }, [onClose])
 
+  const presentSet = albumInfo?.albumIdsSet || new Set()
+  const presentCount = albumInfo?.albumCount || presentSet.size || 1
+
   const filteredAlbums = useMemo(() => {
     const q = albumFilter.trim().toLowerCase()
-    if (!q) return allAlbums
-    return allAlbums.filter(
-      (a) =>
-        a.name.toLowerCase().includes(q) ||
-        (a.categoryPath && a.categoryPath.toLowerCase().includes(q))
-    )
-  }, [allAlbums, albumFilter])
+    let list = allAlbums
+    if (q) {
+      list = allAlbums.filter(
+        (a) =>
+          a.name.toLowerCase().includes(q) ||
+          (a.categoryPath && a.categoryPath.toLowerCase().includes(q))
+      )
+    }
+
+    // Poner arriba del todo los álbumes que ya estén seleccionados para esta canción
+    return [...list].sort((a, b) => {
+      const aPresent = presentSet.has(a.id) ? 1 : 0
+      const bPresent = presentSet.has(b.id) ? 1 : 0
+      if (aPresent !== bPresent) {
+        return bPresent - aPresent // Seleccionados (1) arriba de los no seleccionados (0)
+      }
+      return (a.name || '').localeCompare(b.name || '')
+    })
+  }, [allAlbums, albumFilter, presentSet])
 
   const popWidth = 320
   const popMaxHeight = 410
@@ -229,9 +258,6 @@ function AlbumMembershipPopover({
   if (top + popMaxHeight > winH - 70) {
     top = Math.max(16, (position?.anchorTop ?? top) - popMaxHeight - 6)
   }
-
-  const presentSet = albumInfo?.albumIdsSet || new Set()
-  const presentCount = albumInfo?.albumCount || presentSet.size || 1
 
   const handleToggleAlbum = async (albumItem) => {
     if (busyAlbumId) return
@@ -616,8 +642,18 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
     }
   }
 
+  const handleInputKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleFormSubmit()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      if (!isSaving) onClose()
+    }
+  }
+
   const modalContent = (
-    <div className="track-modal-backdrop" onClick={() => !isSaving && onClose()}>
+    <div className="track-modal-backdrop">
       <div className="track-modal-card track-edit-modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Editar información de la canción">
         <form onSubmit={handleFormSubmit} className="track-modal-form">
           <div className="track-modal-header">
@@ -644,7 +680,7 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
                 <p className="track-modal-subtitle">{track.title} — {track.artist}</p>
               </div>
             </div>
-            <button type="button" className="track-modal-close" onClick={onClose} disabled={isSaving} title="Cerrar">
+            <button type="button" className="track-modal-close" onClick={onClose} disabled={isSaving} title="Cerrar (Esc)">
               ✕
             </button>
           </div>
@@ -662,8 +698,10 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
                     hasUserEditedRef.current = true
                     setTitle(e.target.value)
                   }}
+                  onKeyDown={handleInputKeyDown}
                   placeholder="Título de la canción..."
                   required
+                  autoFocus
                 />
               </div>
 
@@ -677,6 +715,7 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
                     hasUserEditedRef.current = true
                     setArtist(e.target.value)
                   }}
+                  onKeyDown={handleInputKeyDown}
                   placeholder="Artista o banda..."
                 />
               </div>
@@ -691,6 +730,7 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
                     hasUserEditedRef.current = true
                     setAlbum(e.target.value)
                   }}
+                  onKeyDown={handleInputKeyDown}
                   placeholder="Nombre del álbum..."
                 />
               </div>
@@ -936,7 +976,10 @@ function AlbumView() {
   const handleSaveTrackTags = useCallback(async (track, newTags) => {
     const res = await updateTrackTags(track, newTags)
     if (res && res.success) {
-      showFeedback(`✓ Información actualizada: "${newTags.title}"`)
+      const copiesMsg = res.updatedCount && res.updatedCount > 1
+        ? ` (actualizada en ${res.updatedCount} álbumes)`
+        : ''
+      showFeedback(`✓ Información guardada${copiesMsg}: "${newTags.title}"`)
       setPropertiesTrack(null)
     } else {
       showFeedback(`⚠ ${res?.error || 'No se pudieron guardar los cambios'}`)

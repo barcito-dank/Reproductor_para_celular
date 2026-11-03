@@ -139,7 +139,21 @@ const MiniTrackRow = React.memo(function MiniTrackRow({
       )}
       <div className="mini-track-info">
         <div className="mini-track-title" title={track.title}>{track.title}</div>
-        <div className="mini-track-artist" title={track.artist}>{track.artist}</div>
+        <div className="mini-track-artist-row">
+          <span className="mini-track-artist" title={track.artist}>{track.artist}</span>
+          {track.hasLyrics && (
+            <span
+              className={`track-lyrics-indicator ${track.syncedLyrics ? 'synced' : 'plain'}`}
+              title={track.syncedLyrics ? 'Letras sincronizadas disponibles' : 'Letras disponibles'}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="22" />
+              </svg>
+            </span>
+          )}
+        </div>
       </div>
       {isActive && (
         <div className="mini-track-playing-badge">

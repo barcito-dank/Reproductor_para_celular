@@ -271,6 +271,30 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
           }
         }
         if (coverValid) {
+          if (typeof cached.hasLyrics === 'boolean') {
+            return {
+              ...cached,
+              size: cached.size ?? size,
+              mtime
+            }
+          }
+          // Si no los tiene aún en caché, verificar rápidamente letras
+          let hasLyrics = false
+          let syncedLyrics = false
+          try {
+            const dir = path.dirname(filePath)
+            const base = path.parse(filePath).name
+            const lrcCandidate = path.join(dir, `${base}.lrc`)
+            if (fs.existsSync(lrcCandidate)) {
+              hasLyrics = true
+              const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
+              syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+            }
+          } catch (_) {}
+
+          cached.hasLyrics = hasLyrics
+          cached.syncedLyrics = syncedLyrics
+
           return {
             ...cached,
             size: cached.size ?? size,
@@ -289,6 +313,28 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       coverUrl = await saveCoverBuffer(baseDir, userDataDir, pic.data, pic.format)
     }
 
+    // Detección de letras (LRC externo o ID3/metadatos)
+    let hasLyrics = false
+    let syncedLyrics = false
+    try {
+      const dir = path.dirname(filePath)
+      const base = path.parse(filePath).name
+      const lrcCandidate = path.join(dir, `${base}.lrc`)
+      if (fs.existsSync(lrcCandidate)) {
+        hasLyrics = true
+        const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
+        syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+      }
+    } catch (_) {}
+
+    if (!hasLyrics && common.lyrics && common.lyrics.length > 0) {
+      hasLyrics = true
+      const rawText = typeof common.lyrics[0] === 'string' ? common.lyrics[0] : (common.lyrics[0].text || '')
+      if (rawText && /\[\d{1,2}:\d{2}/.test(rawText)) {
+        syncedLyrics = true
+      }
+    }
+
     const data = {
       title: common.title || path.parse(filePath).name,
       artist: common.artist || 'Artista Desconocido',
@@ -300,7 +346,9 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       codec: format.codec || format.container || path.extname(filePath).replace('.', '').toUpperCase(),
       size,
       mtime,
-      embeddedCover: coverUrl
+      embeddedCover: coverUrl,
+      hasLyrics,
+      syncedLyrics
     }
 
     metadataCache[filePath] = { mtime, data }
@@ -318,7 +366,9 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       codec: path.extname(filePath).replace('.', '').toUpperCase(),
       size: 0,
       mtime: 0,
-      embeddedCover: null
+      embeddedCover: null,
+      hasLyrics: false,
+      syncedLyrics: false
     }
   }
 }
@@ -417,7 +467,9 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
             albumId,
             albumName,
             albumPath,
-            cover: meta.embeddedCover || albumCoverUrl
+            cover: meta.embeddedCover || albumCoverUrl,
+            hasLyrics: Boolean(meta.hasLyrics),
+            syncedLyrics: Boolean(meta.syncedLyrics)
           }
           baseTrack.uniqueKey = computeTrackUniqueKey(baseTrack)
           return baseTrack

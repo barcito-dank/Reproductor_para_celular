@@ -1627,14 +1627,23 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [musicDirectory, currentTrack, selectedAlbum])
 
-  // Editar información y etiquetas de una canción (Tag Editor ID3)
+  // Editar información y etiquetas de una canción (Tag Editor ID3) en este y todos los demás álbumes donde exista
   const updateTrackTags = useCallback(async (track, newTags) => {
     if (!track?.path || !window.electronAPI?.updateTrackTags) {
       return { success: false, error: 'Ruta no válida o API no disponible' }
     }
     try {
+      const info = getTrackAlbumInfo(track)
+      const copies = info?.copies || []
+      const pathsToUpdate = new Set()
+      if (track.path) pathsToUpdate.add(track.path)
+      for (const copy of copies) {
+        if (copy.track?.path) pathsToUpdate.add(copy.track.path)
+      }
+
       const res = await window.electronAPI.updateTrackTags({
         filePath: track.path,
+        filePaths: Array.from(pathsToUpdate),
         title: newTags.title,
         artist: newTags.artist,
         album: newTags.album,
@@ -1644,7 +1653,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         if (Array.isArray(res.library)) {
           setRawLibrary(res.library)
         }
-        if (currentTrack && (currentTrack.id === track.id || currentTrack.path === track.path)) {
+        if (currentTrack && (currentTrack.id === track.id || pathsToUpdate.has(currentTrack.path))) {
           setCurrentTrack((prev) => ({
             ...prev,
             title: newTags.title ? newTags.title.trim() : prev.title,
@@ -1657,7 +1666,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       console.error('Error al actualizar tags ID3:', err)
       return { success: false, error: err.message }
     }
-  }, [musicDirectory, currentTrack])
+  }, [musicDirectory, currentTrack, getTrackAlbumInfo])
 
   // Contexto de Biblioteca (cambia únicamente al escanear, crear/mover álbumes o seleccionar álbum)
   // Al aislarlo, componentes como Sidebar NO se re-renderizan con cambios de volumen, tiempo o play/pause
