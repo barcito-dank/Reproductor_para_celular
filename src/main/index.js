@@ -765,8 +765,9 @@ function toggleSidePanel(fromUIButton = false) {
   }
 }
 
-// Configuración del directorio de música
+// Configuración del directorio de música (Enlaces duros en canciones_organizadas -> Archivos maestros en Canciones_reales)
 const CONFIGURED_MUSIC_DIR = 'C:\\Users\\barre\\Music\\canciones_organizadas'
+const CONFIGURED_REAL_MUSIC_DIR = 'C:\\Users\\barre\\Music\\Canciones_reales'
 
 async function getMusicDirectory() {
   try {
@@ -781,6 +782,198 @@ async function getMusicDirectory() {
   } catch (_) {}
 
   return path.join(app.getAppPath(), 'canciones_organizadas')
+}
+
+async function getRealMusicDirectory() {
+  try {
+    await fs.promises.access(CONFIGURED_REAL_MUSIC_DIR)
+    return CONFIGURED_REAL_MUSIC_DIR
+  } catch (_) {}
+
+  const defaultRealMusic = path.join(app.getPath('music'), 'Canciones_reales')
+  try {
+    await fs.promises.access(defaultRealMusic)
+    return defaultRealMusic
+  } catch (_) {}
+
+  return CONFIGURED_REAL_MUSIC_DIR
+}
+
+/**
+ * Busca en Canciones_reales el archivo maestro que comparte el mismo inodo NTFS (stats.ino)
+ * que el enlace duro en canciones_organizadas.
+ */
+async function findRealMusicFilesByInode(targetIno, fallbackFileName) {
+  const realDir = await getRealMusicDirectory()
+  try {
+    await fs.promises.access(realDir)
+  } catch (_) {
+    return []
+  }
+
+  const matches = []
+  const resolvedRealDir = path.resolve(realDir).toLowerCase()
+
+  // 1. Vía rápida O(1): comprobar si existe con el mismo nombre de archivo directamente en Canciones_reales
+  if (fallbackFileName) {
+    const directCandidate = path.join(realDir, fallbackFileName)
+    try {
+      const st = await fs.promises.stat(directCandidate, { bigint: true })
+      if (st.isFile()) {
+        if (targetIno && targetIno > 0n && st.ino === targetIno) {
+          return [{ path: directCandidate, nlink: Number(st.nlink || 1) }]
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 2. Búsqueda recursiva por inodo NTFS (por si el archivo fue renombrado o está en subcarpetas dentro de Canciones_reales)
+  if (!targetIno || targetIno <= 0n) return matches
+
+  async function walk(currentDir) {
+    let entries = []
+    try {
+      entries = await fs.promises.readdir(currentDir, { withFileTypes: true })
+    } catch (_) {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const fullPath = path.join(currentDir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(fullPath)
+      } else if (entry.isFile()) {
+        try {
+          const st = await fs.promises.stat(fullPath, { bigint: true })
+          if (st.ino === targetIno && path.resolve(fullPath).toLowerCase().startsWith(resolvedRealDir)) {
+            matches.push({ path: fullPath, nlink: Number(st.nlink || 1) })
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  await walk(realDir)
+  return matches
+}
+
+/**
+ * Elimina un enlace duro (Hard Link) en canciones_organizadas usando fs.promises.unlink.
+ * NO toca el archivo original en Canciones_reales salvo que este enlace sea el último
+ * enlace duro en la biblioteca (o se indique forceDeleteMaster), en cuyo caso también
+ * elimina el archivo maestro en Canciones_reales.
+ */
+async function unlinkHardLinkAndCleanupMaster(filePath, { forceDeleteMaster = false } = {}) {
+  const normalizedPath = path.normalize(filePath)
+  let targetIno = 0n
+  let nlinkBefore = 1
+  const fileName = path.basename(normalizedPath)
+
+  try {
+    const st = await fs.promises.stat(normalizedPath, { bigint: true })
+    targetIno = st.ino || 0n
+    nlinkBefore = Number(st.nlink || 1)
+  } catch (err) {
+    return { success: false, error: 'El enlace o archivo ya no existe en el disco' }
+  }
+
+  // 1. Eliminar exclusivamente el enlace en canciones_organizadas mediante fs.unlink
+  try {
+    await fs.promises.unlink(normalizedPath)
+  } catch (unlinkErr) {
+    return { success: false, error: unlinkErr.message || 'No se pudo eliminar el enlace duro' }
+  }
+
+  removeFromMetadataCache(normalizedPath)
+  removeFromMetadataCache(filePath)
+
+  // 2. Si era el último enlace en canciones_organizadas (nlinkBefore <= 2: 1 en canciones_organizadas + 1 en Canciones_reales)
+  // o si se solicitó eliminar de todos lados (forceDeleteMaster), verificar y borrar el original en Canciones_reales
+  let masterDeleted = false
+  const deletedMasterPaths = []
+
+  if (nlinkBefore <= 2 || forceDeleteMaster) {
+    try {
+      const realMatches = await findRealMusicFilesByInode(targetIno, fileName)
+      for (const match of realMatches) {
+        // Solo borrar en Canciones_reales si ya no le queda ningún otro enlace en canciones_organizadas (nlink <= 1) o forceDeleteMaster
+        if (match.nlink <= 1 || forceDeleteMaster) {
+          try {
+            await fs.promises.unlink(match.path)
+            removeFromMetadataCache(match.path)
+            masterDeleted = true
+            deletedMasterPaths.push(match.path)
+            console.log(`[HardLink] Último enlace eliminado -> Archivo maestro eliminado en Canciones_reales: ${match.path}`)
+          } catch (masterErr) {
+            console.warn(`[HardLink] No se pudo eliminar el archivo maestro en ${match.path}:`, masterErr.message)
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[HardLink] Error verificando archivo maestro en Canciones_reales:', err.message)
+    }
+  }
+
+  return {
+    success: true,
+    masterDeleted,
+    deletedMasterPaths
+  }
+}
+
+/**
+ * Mueve o renombra una carpeta de álbum preservando siempre los Hard Links hacia Canciones_reales:
+ * 1. Intenta fs.promises.rename (en Windows NTFS conserva el vínculo al archivo original al 100%).
+ * 2. Si falla (ej. bloqueo temporal de carpeta en Windows), recrea la estructura creando un nuevo
+ *    Hard Link (fs.promises.link) en la carpeta destino y borrando el enlace viejo (fs.promises.unlink).
+ */
+async function moveDirectoryPreservingHardLinks(srcDir, destDir) {
+  try {
+    await fs.promises.rename(srcDir, destDir)
+    return
+  } catch (firstRenameErr) {
+    // Breve espera por si el watcher o Windows Explorer tenían un handle abierto
+    await new Promise((r) => setTimeout(r, 60))
+    try {
+      await fs.promises.rename(srcDir, destDir)
+      return
+    } catch (_) {
+      // Fallback explícito mediante fs.link (nuevo enlace duro) + fs.unlink (borrar enlace viejo)
+      await relinkDirectoryRecursive(srcDir, destDir)
+    }
+  }
+}
+
+async function relinkDirectoryRecursive(srcDir, destDir) {
+  await fs.promises.mkdir(destDir, { recursive: true })
+  const entries = await fs.promises.readdir(srcDir, { withFileTypes: true })
+
+  for (const entry of entries) {
+    const srcEntryPath = path.join(srcDir, entry.name)
+    const destEntryPath = path.join(destDir, entry.name)
+
+    if (entry.isDirectory()) {
+      await relinkDirectoryRecursive(srcEntryPath, destEntryPath)
+    } else {
+      // Crear el nuevo Hard Link apuntando al mismo inodo del archivo original y luego borrar el enlace antiguo
+      try {
+        await fs.promises.link(srcEntryPath, destEntryPath)
+      } catch (linkErr) {
+        if (linkErr.code === 'EEXIST') {
+          await fs.promises.unlink(destEntryPath)
+          await fs.promises.link(srcEntryPath, destEntryPath)
+        } else if (linkErr.code === 'EXDEV') {
+          await fs.promises.copyFile(srcEntryPath, destEntryPath)
+        } else {
+          throw linkErr
+        }
+      }
+      await fs.promises.unlink(srcEntryPath)
+      removeFromMetadataCache(srcEntryPath)
+    }
+  }
+
+  await fs.promises.rmdir(srcDir)
 }
 
 // ---- IPC Handlers ----
@@ -836,11 +1029,23 @@ ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums,
       await fs.promises.mkdir(album.path, { recursive: true })
       const destPath = path.join(album.path, fileName)
       if (path.resolve(sourceTrackPath).toLowerCase() !== path.resolve(destPath).toLowerCase()) {
-        await fs.promises.copyFile(sourceTrackPath, destPath)
+        // Crear un nuevo Hard Link apuntando al mismo inodo del archivo real en Canciones_reales
+        try {
+          await fs.promises.link(sourceTrackPath, destPath)
+        } catch (linkErr) {
+          if (linkErr.code === 'EEXIST') {
+            await fs.promises.unlink(destPath)
+            await fs.promises.link(sourceTrackPath, destPath)
+          } else if (linkErr.code === 'EXDEV') {
+            await fs.promises.copyFile(sourceTrackPath, destPath)
+          } else {
+            throw linkErr
+          }
+        }
         copiedAlbums.push({ id: album.id, name: album.name, destPath })
       }
     } catch (err) {
-      console.error(`Error copiando pista a ${album.path}:`, err.message)
+      console.error(`Error enlazando pista a ${album.path}:`, err.message)
     }
   }
 
@@ -850,35 +1055,25 @@ ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums,
   return { success: true, copiedAlbums, library }
 })
 
-ipcMain.handle('delete-track-file', async (_, { filePath, selectedDirectory }) => {
+ipcMain.handle('delete-track-file', async (_, { filePath, forceDeleteMaster = false, selectedDirectory }) => {
   if (!filePath || typeof filePath !== 'string') {
     return { success: false, error: 'Ruta de archivo inválida' }
   }
 
-  const normalizedPath = path.normalize(filePath)
-  try {
-    await fs.promises.access(normalizedPath)
-  } catch (_) {
-    return { success: false, error: 'El archivo ya no existe en el disco' }
+  const res = await unlinkHardLinkAndCleanupMaster(filePath, { forceDeleteMaster: Boolean(forceDeleteMaster) })
+  if (!res.success) {
+    return { success: false, error: res.error || 'No se pudo eliminar el enlace de la pista' }
   }
-
-  try {
-    await shell.trashItem(normalizedPath)
-  } catch (_) {
-    try {
-      await fs.promises.unlink(normalizedPath)
-    } catch (unlinkErr) {
-      return { success: false, error: unlinkErr.message || 'No se pudo eliminar el archivo' }
-    }
-  }
-
-  removeFromMetadataCache(normalizedPath)
-  removeFromMetadataCache(filePath)
 
   const musicDir = selectedDirectory || await getMusicDirectory()
   const userDataDir = app.getPath('userData')
   const library = await scanMusicDirectory(musicDir, userDataDir)
-  return { success: true, library }
+  return {
+    success: true,
+    masterDeleted: res.masterDeleted,
+    deletedMasterPaths: res.deletedMasterPaths,
+    library
+  }
 })
 
 ipcMain.handle('get-track-properties', async (_, filePath) => {
@@ -935,6 +1130,7 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
   }
 
   let updatedCount = 0
+  const writtenInodes = new Set()
   const tags = {}
   if (typeof title === 'string') tags.title = title.trim()
   if (typeof artist === 'string') tags.artist = artist.trim()
@@ -946,7 +1142,17 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
       const normalizedPath = path.normalize(rawPath)
       const ext = path.extname(normalizedPath).toLowerCase()
       if (ext === '.mp3') {
-        NodeID3.update(tags, normalizedPath)
+        let ino = 0n
+        try {
+          const st = await fs.promises.stat(normalizedPath, { bigint: true })
+          ino = st.ino || 0n
+        } catch (_) {}
+
+        // Al ser Hard Links al mismo archivo en Canciones_reales, escribir una sola vez por inodo actualiza todos los enlaces
+        if (!ino || !writtenInodes.has(ino)) {
+          NodeID3.update(tags, normalizedPath)
+          if (ino) writtenInodes.add(ino)
+        }
       }
 
       removeFromMetadataCache(normalizedPath)
@@ -1042,11 +1248,15 @@ ipcMain.handle('get-track-lyrics', async (_, filePath) => {
     const dir = path.dirname(normalizedPath)
     const baseName = path.parse(normalizedPath).name
 
-    // 1. Buscar archivo .lrc o .txt externo en el mismo directorio
+    // 1. Buscar archivo .lrc o .txt externo en el mismo directorio del álbum o en Canciones_reales
+    const realMusicDir = await getRealMusicDirectory()
     const candidateFiles = [
       path.join(dir, `${baseName}.lrc`),
       path.join(dir, `${baseName}.LRC`),
-      path.join(dir, `${baseName}.txt`)
+      path.join(dir, `${baseName}.txt`),
+      path.join(realMusicDir, `${baseName}.lrc`),
+      path.join(realMusicDir, `${baseName}.LRC`),
+      path.join(realMusicDir, `${baseName}.txt`)
     ]
 
     for (const candidate of candidateFiles) {
@@ -1182,12 +1392,7 @@ ipcMain.handle('move-album-folder', async (_, { sourcePath, targetParentDir, sel
 
   try {
     await fs.promises.mkdir(resolvedDestParent, { recursive: true })
-    try {
-      await fs.promises.rename(resolvedSource, resolvedDest)
-    } catch (renameErr) {
-      await fs.promises.cp(resolvedSource, resolvedDest, { recursive: true })
-      await fs.promises.rm(resolvedSource, { recursive: true, force: true })
-    }
+    await moveDirectoryPreservingHardLinks(resolvedSource, resolvedDest)
   } catch (err) {
     console.error('Error moviendo carpeta de álbum:', err.message)
     return { success: false, error: err.message || 'No se pudo mover el álbum' }
@@ -1232,12 +1437,7 @@ ipcMain.handle('rename-album-folder', async (_, { albumPath, newName, selectedDi
   }
 
   try {
-    try {
-      await fs.promises.rename(resolvedPath, destPath)
-    } catch (renameErr) {
-      await fs.promises.cp(resolvedPath, destPath, { recursive: true })
-      await fs.promises.rm(resolvedPath, { recursive: true, force: true })
-    }
+    await moveDirectoryPreservingHardLinks(resolvedPath, destPath)
   } catch (err) {
     console.error('Error renombrando álbum:', err.message)
     return { success: false, error: err.message || 'No se pudo renombrar el álbum' }
@@ -1278,11 +1478,21 @@ ipcMain.handle('delete-album-folder', async (_, { albumPath, selectedDirectory }
   }
 
   try {
-    try {
-      await shell.trashItem(resolvedPath)
-    } catch {
-      await fs.promises.rm(resolvedPath, { recursive: true, force: true })
+    // Desenlazar cada archivo con fs.unlink y limpiar en Canciones_reales solo aquellos cuyo último enlace estaba en este álbum
+    async function unlinkFolderContents(dirPath) {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name)
+        if (entry.isDirectory()) {
+          await unlinkFolderContents(fullPath)
+        } else {
+          await unlinkHardLinkAndCleanupMaster(fullPath)
+        }
+      }
     }
+
+    await unlinkFolderContents(resolvedPath)
+    await fs.promises.rm(resolvedPath, { recursive: true, force: true })
   } catch (err) {
     console.error('Error eliminando álbum:', err.message)
     return { success: false, error: err.message || 'No se pudo eliminar la carpeta' }

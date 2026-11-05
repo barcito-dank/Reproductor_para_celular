@@ -434,7 +434,10 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
 
         <div className="track-modal-body">
           <p className="track-delete-warning">
-            Se enviará la carpeta y todas sus canciones a la Papelera de reciclaje:
+            Se eliminará la carpeta del álbum y sus <strong>enlaces duros (Hard Links)</strong> en{' '}
+            <code>canciones_organizadas</code> (<code>fs.unlink</code>). Las canciones que aún tengan enlaces en otros álbumes conservarán su archivo original en{' '}
+            <code>Canciones_reales</code>; aquellas cuyo <strong>último enlace</strong> esté en este álbum también se eliminarán de{' '}
+            <code>Canciones_reales</code>:
           </p>
           <div className="track-delete-path-box">{node.path}</div>
         </div>

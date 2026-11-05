@@ -18,6 +18,10 @@ export const TODOS_ALBUM_COVER = `data:image/svg+xml;charset=utf-8,${encodeURICo
 export function getTrackUniqueKey(track) {
   if (!track) return ''
 
+  if (track.ino && String(track.ino) !== '0') {
+    return `ino:${track.ino}`
+  }
+
   const normTitle = (track.title || '')
     .toLowerCase()
     .replace(/(?:\s*-\s*(?:copia|copy)|\s*\(\d+\))+$/i, '')

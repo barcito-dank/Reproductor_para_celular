@@ -37,9 +37,14 @@ function getSongAlbumsIndexPath(baseDir, userDataDir) {
 /**
  * Genera una clave canónica de identidad para detectar canciones iguales
  * en múltiples álbumes dentro del directorio de música.
+ * Prioriza el inodo NTFS (track.ino) para identificar Hard Links al mismo archivo real con 100% de exactitud.
  */
 function computeTrackUniqueKey(track) {
   if (!track) return ''
+
+  if (track.ino && String(track.ino) !== '0') {
+    return `ino:${track.ino}`
+  }
 
   const normTitle = (track.title || '')
     .toLowerCase()
@@ -235,9 +240,11 @@ async function findCoverImage(albumDir, preloadedEntries = null) {
  */
 async function extractMetadata(filePath, baseDir, userDataDir) {
   try {
-    const stats = await fs.promises.stat(filePath)
-    const mtime = stats.mtimeMs
-    const size = stats.size
+    const stats = await fs.promises.stat(filePath, { bigint: true })
+    const mtime = Number(stats.mtimeMs)
+    const size = Number(stats.size)
+    const ino = stats.ino && stats.ino > 0n ? stats.ino.toString() : null
+    const nlink = Number(stats.nlink || 1)
 
     if (metadataCache[filePath] && metadataCache[filePath].mtime === mtime) {
       const cached = metadataCache[filePath].data
@@ -274,6 +281,8 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
           if (typeof cached.hasLyrics === 'boolean') {
             return {
               ...cached,
+              ino,
+              nlink,
               size: cached.size ?? size,
               mtime
             }
@@ -284,11 +293,17 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
           try {
             const dir = path.dirname(filePath)
             const base = path.parse(filePath).name
-            const lrcCandidate = path.join(dir, `${base}.lrc`)
-            if (fs.existsSync(lrcCandidate)) {
-              hasLyrics = true
-              const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
-              syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+            const lrcCandidates = [
+              path.join(dir, `${base}.lrc`),
+              path.join('C:\\Users\\barre\\Music\\Canciones_reales', `${base}.lrc`)
+            ]
+            for (const lrcCandidate of lrcCandidates) {
+              if (fs.existsSync(lrcCandidate)) {
+                hasLyrics = true
+                const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
+                syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+                break
+              }
             }
           } catch (_) {}
 
@@ -297,6 +312,8 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
 
           return {
             ...cached,
+            ino,
+            nlink,
             size: cached.size ?? size,
             mtime
           }
@@ -313,17 +330,23 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       coverUrl = await saveCoverBuffer(baseDir, userDataDir, pic.data, pic.format)
     }
 
-    // Detección de letras (LRC externo o ID3/metadatos)
+    // Detección de letras (LRC externo en álbum o en Canciones_reales, o ID3/metadatos)
     let hasLyrics = false
     let syncedLyrics = false
     try {
       const dir = path.dirname(filePath)
       const base = path.parse(filePath).name
-      const lrcCandidate = path.join(dir, `${base}.lrc`)
-      if (fs.existsSync(lrcCandidate)) {
-        hasLyrics = true
-        const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
-        syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+      const lrcCandidates = [
+        path.join(dir, `${base}.lrc`),
+        path.join('C:\\Users\\barre\\Music\\Canciones_reales', `${base}.lrc`)
+      ]
+      for (const lrcCandidate of lrcCandidates) {
+        if (fs.existsSync(lrcCandidate)) {
+          hasLyrics = true
+          const lrcContent = await fs.promises.readFile(lrcCandidate, 'utf8')
+          syncedLyrics = /\[\d{1,2}:\d{2}/.test(lrcContent)
+          break
+        }
       }
     } catch (_) {}
 
@@ -346,6 +369,8 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       codec: format.codec || format.container || path.extname(filePath).replace('.', '').toUpperCase(),
       size,
       mtime,
+      ino,
+      nlink,
       embeddedCover: coverUrl,
       hasLyrics,
       syncedLyrics
@@ -366,6 +391,8 @@ async function extractMetadata(filePath, baseDir, userDataDir) {
       codec: path.extname(filePath).replace('.', '').toUpperCase(),
       size: 0,
       mtime: 0,
+      ino: null,
+      nlink: 1,
       embeddedCover: null,
       hasLyrics: false,
       syncedLyrics: false
@@ -461,6 +488,8 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
             duration: meta.duration,
             size: meta.size || 0,
             mtime: meta.mtime || 0,
+            ino: meta.ino || null,
+            nlink: meta.nlink || 1,
             bitrate: meta.bitrate || null,
             sampleRate: meta.sampleRate || null,
             codec: meta.codec || path.extname(audioFile).replace('.', '').toUpperCase(),

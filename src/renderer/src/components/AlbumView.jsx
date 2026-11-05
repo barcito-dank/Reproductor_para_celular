@@ -336,9 +336,9 @@ function AlbumMembershipPopover({
               title={
                 isPresent
                   ? presentCount <= 1
-                    ? `Desmarcar para eliminar canción (es su único álbum "${alb.name}", requiere confirmación)`
-                    : `Desmarcar para quitar de "${alb.name}" (sin confirmación)`
-                  : `Marcar para agregar copia a "${alb.name}"`
+                    ? `Desmarcar para eliminar canción y su archivo original (es su único enlace en "${alb.name}", requiere confirmación)`
+                    : `Desmarcar para quitar el enlace de "${alb.name}" (sin confirmación)`
+                  : `Marcar para crear enlace duro en "${alb.name}"`
               }
             >
               <input
@@ -379,10 +379,10 @@ function AlbumMembershipPopover({
 
               <span className={`album-picker-status ${isPresent ? 'in-album' : 'add-hint'}`}>
                 {isBusy
-                  ? (isPresent ? 'Quitando...' : 'Copiando...')
+                  ? (isPresent ? 'Quitando...' : 'Enlazando...')
                   : isPresent
                     ? 'En álbum'
-                    : '+ Agregar'}
+                    : '+ Enlazar'}
               </span>
             </label>
           )
@@ -862,19 +862,22 @@ function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
           <p className="track-delete-warning">
             {isAllMode ? (
               <>
-                Esta canción será eliminada por completo de <strong>todos los álbumes</strong> donde se encuentra
-                {albumNames.length > 0 && ` (${albumNames.join(', ')})`}. Todos los archivos de audio asociados se enviarán a la Papelera de reciclaje:
+                Se eliminarán <strong>todos los enlaces duros (Hard Links)</strong> de esta canción en la biblioteca
+                {albumNames.length > 0 && ` (${albumNames.join(', ')})`}. Al no quedar ningún enlace activo en{' '}
+                <code>canciones_organizadas</code>, <strong>también se eliminará definitivamente el archivo original en <code>Canciones_reales</code></strong>:
               </>
             ) : isLastAlbum ? (
               <>
-                Esta canción solo pertenece al álbum{' '}
+                Esta canción solo tiene enlace en el álbum{' '}
                 <strong>&ldquo;{album?.name || track.albumName || 'este álbum'}&rdquo;</strong>.
-                Al eliminarla, se borrará de la biblioteca y el archivo de audio se enviará a la Papelera de reciclaje:
+                Al tratarse de su <strong>último enlace duro</strong> en <code>canciones_organizadas</code>, se eliminará este enlace y{' '}
+                <strong>también se eliminará definitivamente el archivo original en <code>Canciones_reales</code></strong>:
               </>
             ) : (
               <>
-                Se quitará la copia de esta canción de la carpeta de{' '}
-                <strong>&ldquo;{album?.name || 'este álbum'}&rdquo;</strong>. La canción seguirá estando disponible en los demás álbumes donde está agregada:
+                Se eliminará únicamente el <strong>enlace duro (Hard Link)</strong> de esta canción en la carpeta de{' '}
+                <strong>&ldquo;{album?.name || 'este álbum'}&rdquo;</strong> (<code>fs.unlink</code>).{' '}
+                <strong>No se tocará el archivo original en <code>Canciones_reales</code></strong> y la canción seguirá disponible en los demás álbumes:
               </>
             )}
           </p>
@@ -899,10 +902,10 @@ function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
             {isDeleting
               ? 'Eliminando...'
               : isAllMode
-                ? 'Sí, eliminar de todos los álbumes'
+                ? 'Sí, eliminar enlaces y archivo original'
                 : isLastAlbum
-                  ? 'Sí, eliminar de todos lados'
-                  : 'Sí, quitar de este álbum'}
+                  ? 'Sí, eliminar último enlace y original'
+                  : 'Sí, quitar enlace de este álbum'}
           </button>
         </div>
       </div>

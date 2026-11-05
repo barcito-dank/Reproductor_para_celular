@@ -1209,10 +1209,14 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [musicDirectory])
 
-  // Eliminar archivo de canción del disco (liberando antes el reproductor si estaba cargada)
-  const deleteTrackFromDisk = useCallback(async (track) => {
+  // Eliminar enlace duro de canción del disco (y el original en Canciones_reales si era su último enlace)
+  const deleteTrackFromDisk = useCallback(async (track, options = {}) => {
     if (!track?.path) return { success: false }
     try {
+      const info = getTrackAlbumInfo(track)
+      const isLastAlbumLink = (info?.albumCount || 1) <= 1
+      const forceDeleteMaster = Boolean(options.forceDeleteMaster ?? isLastAlbumLink)
+
       const audio = audioRef.current
       if (currentTrack && (currentTrack.id === track.id || currentTrack.path === track.path)) {
         const remaining = playlist.filter((t) => t.id !== track.id && t.path !== track.path)
@@ -1238,6 +1242,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
       const result = await window.electronAPI.deleteTrackFile({
         filePath: track.path,
+        forceDeleteMaster,
         selectedDirectory: musicDirectory || undefined
       })
 
@@ -1246,16 +1251,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
       return result || { success: false }
     } catch (err) {
-      console.error('Error eliminando archivo de canción:', err)
+      console.error('Error eliminando enlace de canción:', err)
       return { success: false, error: err.message }
     }
-  }, [currentTrack, playlist, playlistIndex, musicDirectory])
+  }, [currentTrack, playlist, playlistIndex, musicDirectory, getTrackAlbumInfo])
 
-  // Quitar una canción de un álbum específico (eliminando la copia física de la carpeta de ese álbum)
+  // Quitar una canción de un álbum específico (eliminando el Hard Link de la carpeta de ese álbum)
   const removeTrackFromAlbum = useCallback(async (track, targetAlbum) => {
     if (!track || !targetAlbum) return { success: false, error: 'Parámetros inválidos' }
     try {
       const info = getTrackAlbumInfo(track)
+      const isLastAlbumLink = (info?.albumCount || 1) <= 1
       const targetAlbumPath = (targetAlbum.path || '').replace(/\\/g, '/').toLowerCase()
       const targetAlbumId = targetAlbum.id
 
@@ -1308,17 +1314,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
 
       if (!trackToDelete || !trackToDelete.path) {
-        return { success: false, error: 'No se encontró el archivo de la pista en el álbum indicado' }
+        return { success: false, error: 'No se encontró el enlace de la pista en el álbum indicado' }
       }
 
-      return await deleteTrackFromDisk(trackToDelete)
+      return await deleteTrackFromDisk(trackToDelete, { forceDeleteMaster: isLastAlbumLink })
     } catch (err) {
       console.error('Error al quitar canción del álbum:', err)
       return { success: false, error: err.message }
     }
   }, [getTrackAlbumInfo, deleteTrackFromDisk])
 
-  // Eliminar una canción de TODOS los álbumes donde exista (todas sus copias físicas en disco)
+  // Eliminar una canción de TODOS los álbumes donde exista (todos sus Hard Links + el archivo original en Canciones_reales)
   const deleteTrackFromAllAlbums = useCallback(async (track) => {
     if (!track) return { success: false }
     try {
@@ -1362,10 +1368,14 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
       }
 
+      const pathsArray = Array.from(pathsToDelete)
       let lastResult = { success: true }
-      for (const filePath of pathsToDelete) {
+      for (let i = 0; i < pathsArray.length; i++) {
+        const filePath = pathsArray[i]
+        const isFinalLink = i === pathsArray.length - 1
         lastResult = await window.electronAPI.deleteTrackFile({
           filePath,
+          forceDeleteMaster: isFinalLink,
           selectedDirectory: musicDirectory || undefined
         })
       }
