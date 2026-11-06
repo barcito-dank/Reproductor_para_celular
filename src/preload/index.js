@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('library-updated', handler)
   },
   createAlbum: (payload) => ipcRenderer.invoke('create-album', payload),
+  createFolder: (payload) => ipcRenderer.invoke('create-folder', payload),
   moveAlbumFolder: (payload) => ipcRenderer.invoke('move-album-folder', payload),
   renameAlbumFolder: (payload) => ipcRenderer.invoke('rename-album-folder', payload),
   deleteAlbumFolder: (payload) => ipcRenderer.invoke('delete-album-folder', payload),

@@ -4421,6 +4421,88 @@ body.is-dragging-album * {
   text-align: center;
 }
 
+.album-context-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+.album-context-item.highlight {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.album-context-item.highlight:hover {
+  background: rgba(124, 92, 252, 0.15);
+}
+
+.album-context-item.quick-dest {
+  padding: 5px 10px 5px 16px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.album-context-item.quick-dest:hover {
+  color: var(--accent);
+  background: rgba(124, 92, 252, 0.12);
+}
+
+.quick-dest-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-context-shortcut {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.album-move-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  padding: 8px 6px 4px;
+  margin-top: 4px;
+}
+
+.album-move-item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid transparent;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+
+.album-move-item:hover {
+  background: var(--bg-hover);
+}
+
+.album-move-item.selected {
+  background: rgba(124, 92, 252, 0.22);
+  border-color: var(--accent);
+}
+
+.album-move-quick-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  font-weight: 600;
+}
+
+.album-move-item:hover .album-move-quick-hint {
+  opacity: 1;
+}
+
 .album-input-label {
   display: block;
   font-size: 12px;

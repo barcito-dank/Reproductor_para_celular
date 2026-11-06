@@ -59,7 +59,7 @@ const TreeNode = React.memo(function TreeNode({
   const isAllTracks = Boolean(node.isAllTracks || node.id === '__all_tracks__')
 
   const handleContextMenu = (e) => {
-    if (draggable) {
+    if (draggable || isAllTracks) {
       e.preventDefault()
       e.stopPropagation()
       onContextMenuNode(node, { x: e.clientX, y: e.clientY }, depth)
@@ -214,13 +214,38 @@ const TreeNode = React.memo(function TreeNode({
 })
 
 /**
- * Menú contextual al hacer clic derecho en un álbum o carpeta
+ * Obtiene el directorio padre de una ruta
+ */
+function getParentDirFromPath(p) {
+  if (!p || p === '__ROOT__') return '__ROOT__'
+  const normalized = p.replace(/[\\/]+$/, '')
+  const lastSep = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'))
+  if (lastSep < 0) return '__ROOT__'
+  return normalized.slice(0, lastSep)
+}
+
+/**
+ * Obtiene el nombre del directorio padre
+ */
+function getParentNameFromPath(p) {
+  if (!p || p === '__ROOT__') return 'Nivel principal'
+  const parentDir = getParentDirFromPath(p)
+  if (parentDir === '__ROOT__') return 'Nivel principal'
+  const lastSep = Math.max(parentDir.lastIndexOf('\\'), parentDir.lastIndexOf('/'))
+  return lastSep >= 0 ? parentDir.slice(lastSep + 1) : parentDir
+}
+
+/**
+ * Menú contextual al hacer clic derecho en un álbum, carpeta o fondo
  */
 function AlbumContextMenu({
   node,
   position,
   depth = 0,
+  isBackground = false,
   onClose,
+  onCreateAlbum,
+  onCreateFolder,
   onRename,
   onDelete,
   onOpenMove,
@@ -245,9 +270,7 @@ function AlbumContextMenu({
     }
   }, [onClose])
 
-  const menuWidth = 205
-  const isInsideFolder = depth > 0
-  const menuHeight = isInsideFolder ? 180 : 145
+  const menuWidth = 230
   const winW = typeof window !== 'undefined' ? window.innerWidth : 1200
   const winH = typeof window !== 'undefined' ? window.innerHeight : 800
 
@@ -256,22 +279,125 @@ function AlbumContextMenu({
     left = Math.max(10, position.x - menuWidth)
   }
   let top = position.y
-  if (top + menuHeight > winH - 20) {
-    top = Math.max(10, position.y - menuHeight)
+  if (top + 340 > winH - 20) {
+    top = Math.max(10, winH - 350)
   }
+
+  // Menú contextual para fondo vacío o nodo virtual "Todos"
+  if (isBackground || !node || node.isAllTracks) {
+    const content = (
+      <div
+        ref={menuRef}
+        className="album-context-menu"
+        style={{ left: `${left}px`, top: `${top}px`, width: `${menuWidth}px` }}
+        role="menu"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="album-context-header">
+          <span className="album-context-title">Colección de música</span>
+        </div>
+        <button
+          type="button"
+          className="album-context-item highlight"
+          onClick={() => {
+            onClose()
+            onCreateAlbum('__ROOT__', 'Nivel principal')
+          }}
+        >
+          <span className="album-context-icon">➕</span>
+          <span>Crear álbum en la raíz</span>
+        </button>
+        <button
+          type="button"
+          className="album-context-item highlight"
+          onClick={() => {
+            onClose()
+            onCreateFolder('__ROOT__', 'Nivel principal')
+          }}
+        >
+          <span className="album-context-icon">📁</span>
+          <span>Crear carpeta padre</span>
+        </button>
+      </div>
+    )
+    return typeof document !== 'undefined' ? createPortal(content, document.body) : null
+  }
+
+  const isFolder = node.type === 'folder'
+  const isInsideFolder = depth > 0
+  const parentDir = isInsideFolder ? getParentDirFromPath(node.path) : '__ROOT__'
+  const parentName = isInsideFolder ? getParentNameFromPath(node.path) : 'Nivel principal'
 
   const content = (
     <div
       ref={menuRef}
       className="album-context-menu"
-      style={{ left: `${left}px`, top: `${top}px` }}
+      style={{ left: `${left}px`, top: `${top}px`, width: `${menuWidth}px` }}
       role="menu"
       onClick={(e) => e.stopPropagation()}
     >
       <div className="album-context-header">
-        <span className="album-context-title" title={node.name}>{node.name}</span>
+        <span className="album-context-title" title={node.name}>
+          {isFolder ? '📁 ' : '💿 '}
+          {node.name}
+        </span>
       </div>
 
+      {isFolder ? (
+        <>
+          <button
+            type="button"
+            className="album-context-item highlight"
+            onClick={() => {
+              onClose()
+              onCreateAlbum(node.path, `Dentro de "${node.name}"`)
+            }}
+          >
+            <span className="album-context-icon">➕</span>
+            <span>Crear álbum dentro</span>
+          </button>
+          <button
+            type="button"
+            className="album-context-item highlight"
+            onClick={() => {
+              onClose()
+              onCreateFolder(node.path, `Dentro de "${node.name}"`)
+            }}
+          >
+            <span className="album-context-icon">📁</span>
+            <span>Crear subcarpeta padre</span>
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="album-context-item highlight"
+            onClick={() => {
+              onClose()
+              onCreateAlbum(parentDir, parentName)
+            }}
+          >
+            <span className="album-context-icon">➕</span>
+            <span>Crear álbum aquí</span>
+          </button>
+          <button
+            type="button"
+            className="album-context-item highlight"
+            onClick={() => {
+              onClose()
+              onCreateFolder(parentDir, parentName)
+            }}
+          >
+            <span className="album-context-icon">📁</span>
+            <span>Crear carpeta padre</span>
+          </button>
+        </>
+      )}
+
+      <div className="album-context-divider" />
+
+      {/* Opción de mover a */}
       <button
         type="button"
         className="album-context-item"
@@ -280,8 +406,9 @@ function AlbumContextMenu({
           onOpenMove(node, depth)
         }}
       >
-        <span className="album-context-icon">📁</span>
+        <span className="album-context-icon">📂</span>
         <span>Mover a...</span>
+        <span className="album-context-shortcut">➔</span>
       </button>
 
       {isInsideFolder && (
@@ -298,6 +425,8 @@ function AlbumContextMenu({
         </button>
       )}
 
+      <div className="album-context-divider" />
+
       <button
         type="button"
         className="album-context-item"
@@ -307,7 +436,7 @@ function AlbumContextMenu({
         }}
       >
         <span className="album-context-icon">✏️</span>
-        <span>Renombrar</span>
+        <span>{isFolder ? 'Renombrar carpeta' : 'Renombrar álbum'}</span>
       </button>
 
       <button
@@ -319,7 +448,7 @@ function AlbumContextMenu({
         }}
       >
         <span className="album-context-icon">🗑️</span>
-        <span>Eliminar álbum</span>
+        <span>{isFolder ? 'Eliminar carpeta' : 'Eliminar álbum'}</span>
       </button>
     </div>
   )
@@ -328,11 +457,121 @@ function AlbumContextMenu({
 }
 
 /**
- * Modal para renombrar álbum
+ * Modal para crear un nuevo álbum o una carpeta padre
+ */
+function CreateItemModal({
+  mode = 'album',
+  parentDir = '__ROOT__',
+  locationLabel = 'Nivel principal',
+  onClose,
+  onConfirm,
+  isCreating
+}) {
+  const [name, setName] = useState('')
+  const inputRef = useRef(null)
+  const mouseDownTargetRef = useRef(null)
+  const isFolder = mode === 'folder'
+
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.focus()
+    }
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !isCreating) onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose, isCreating])
+
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    const trimmed = name.trim()
+    if (!trimmed || isCreating) return
+    onConfirm(mode, trimmed, parentDir)
+  }
+
+  const content = (
+    <div
+      className="track-modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownTargetRef.current = e.target
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget && !isCreating) {
+          onClose()
+        }
+      }}
+    >
+      <div className="track-modal-card album-rename-card" onClick={(e) => e.stopPropagation()} role="dialog">
+        <div className="track-modal-header">
+          <div className="track-modal-title-group">
+            <div className="track-modal-cover-placeholder">
+              {isFolder ? '📁' : '➕'}
+            </div>
+            <div>
+              <h3>{isFolder ? 'Crear carpeta padre' : 'Crear nuevo álbum'}</h3>
+              <p className="track-modal-subtitle">Ubicación: {locationLabel || 'Nivel principal'}</p>
+            </div>
+          </div>
+          <button type="button" className="track-modal-close" onClick={onClose} disabled={isCreating}>
+            ✕
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div className="track-modal-body">
+            <label className="album-input-label">
+              {isFolder ? 'Nombre de la carpeta contenedora:' : 'Nombre del nuevo álbum:'}
+            </label>
+            <input
+              ref={inputRef}
+              type="text"
+              className="create-album-input"
+              placeholder={isFolder ? 'Ej: Rock Clásico, Discografías...' : 'Ej: Abbey Road, Greatest Hits...'}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={isCreating}
+            />
+            <p style={{ marginTop: '8px', fontSize: '11.5px', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+              {isFolder
+                ? 'Las carpetas padre aparecen ordenadas al inicio y sirven para agrupar y clasificar múltiples álbumes dentro.'
+                : 'Se creará una nueva carpeta en la que podrás añadir canciones o mover pistas.'}
+            </p>
+          </div>
+
+          <div className="track-modal-footer">
+            <button
+              type="button"
+              className="track-modal-btn secondary"
+              onClick={onClose}
+              disabled={isCreating}
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              className="track-modal-btn primary"
+              disabled={!name.trim() || isCreating}
+            >
+              {isCreating ? 'Creando...' : isFolder ? 'Crear carpeta' : 'Crear álbum'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+
+  return typeof document !== 'undefined' ? createPortal(content, document.body) : null
+}
+
+/**
+ * Modal para renombrar álbum o carpeta
  */
 function RenameAlbumModal({ node, onClose, onConfirm, isRenaming }) {
   const [name, setName] = useState(node.name || '')
   const inputRef = useRef(null)
+  const mouseDownTargetRef = useRef(null)
+  const isFolder = node.type === 'folder'
 
   useEffect(() => {
     if (inputRef.current) {
@@ -354,13 +593,23 @@ function RenameAlbumModal({ node, onClose, onConfirm, isRenaming }) {
   }
 
   const content = (
-    <div className="track-modal-backdrop" onClick={() => !isRenaming && onClose()}>
+    <div
+      className="track-modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownTargetRef.current = e.target
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget && !isRenaming) {
+          onClose()
+        }
+      }}
+    >
       <div className="track-modal-card album-rename-card" onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="track-modal-header">
           <div className="track-modal-title-group">
             <div className="track-modal-cover-placeholder">✏️</div>
             <div>
-              <h3>Renombrar álbum</h3>
+              <h3>Renombrar {isFolder ? 'carpeta' : 'álbum'}</h3>
               <p className="track-modal-subtitle">{node.name}</p>
             </div>
           </div>
@@ -408,9 +657,11 @@ function RenameAlbumModal({ node, onClose, onConfirm, isRenaming }) {
 }
 
 /**
- * Modal de confirmación para eliminar álbum
+ * Modal de confirmación para eliminar álbum o carpeta
  */
 function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
+  const mouseDownTargetRef = useRef(null)
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && !isDeleting) onClose()
@@ -419,27 +670,39 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose, isDeleting])
 
+  const isFolder = node?.type === 'folder'
+
   const content = (
-    <div className="track-modal-backdrop" onClick={() => !isDeleting && onClose()}>
+    <div
+      className="track-modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownTargetRef.current = e.target
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget && !isDeleting) {
+          onClose()
+        }
+      }}
+    >
       <div className="track-modal-card confirm-delete-card" onClick={(e) => e.stopPropagation()} role="alertdialog">
         <div className="track-modal-header">
           <div className="track-modal-title-group">
             <div className="track-delete-icon-badge">🗑️</div>
             <div>
-              <h3>¿Eliminar este álbum?</h3>
-              <p className="track-modal-subtitle">{node.name}</p>
+              <h3>¿Eliminar {isFolder ? 'esta carpeta' : 'este álbum'}?</h3>
+              <p className="track-modal-subtitle">{node?.name}</p>
             </div>
           </div>
         </div>
 
         <div className="track-modal-body">
           <p className="track-delete-warning">
-            Se eliminará la carpeta del álbum y sus <strong>enlaces duros (Hard Links)</strong> en{' '}
-            <code>canciones_organizadas</code> (<code>fs.unlink</code>). Las canciones que aún tengan enlaces en otros álbumes conservarán su archivo original en{' '}
+            Se eliminará la carpeta y sus <strong>enlaces duros (Hard Links)</strong> en{' '}
+            <code>canciones_organizadas</code>. Las canciones que aún tengan enlaces en otros álbumes conservarán su archivo original en{' '}
             <code>Canciones_reales</code>; aquellas cuyo <strong>último enlace</strong> esté en este álbum también se eliminarán de{' '}
             <code>Canciones_reales</code>:
           </p>
-          <div className="track-delete-path-box">{node.path}</div>
+          <div className="track-delete-path-box">{node?.path}</div>
         </div>
 
         <div className="track-modal-footer">
@@ -457,7 +720,7 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
             onClick={() => onConfirm(node)}
             disabled={isDeleting}
           >
-            {isDeleting ? 'Eliminando...' : 'Sí, eliminar álbum'}
+            {isDeleting ? 'Eliminando...' : `Sí, eliminar ${isFolder ? 'carpeta' : 'álbum'}`}
           </button>
         </div>
       </div>
@@ -468,14 +731,21 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
 }
 
 /**
- * Modal para mover álbum o carpeta a otro destino sin arrastrar
+ * Modal optimizado para mover álbum o carpeta a otro destino sin arrastrar
+ * - Doble clic para mover inmediatamente
+ * - Búsqueda rápida con autofocus
+ * - Categorización visual (Carpetas Padre, Nivel Raíz, Otros Álbumes)
  */
 function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving }) {
   const [selectedDestination, setSelectedDestination] = useState(null)
   const [searchFilter, setSearchFilter] = useState('')
   const inputRef = useRef(null)
+  const mouseDownTargetRef = useRef(null)
 
   useEffect(() => {
+    setTimeout(() => {
+      inputRef.current?.focus()
+    }, 40)
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && !isMoving) onClose()
     }
@@ -483,31 +753,39 @@ function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose, isMoving])
 
-  // Destinos válidos (raíz si depth > 0, más álbumes/carpetas elegibles)
-  const availableDestinations = useMemo(() => {
-    const targets = []
+  // Destinos válidos categorizados
+  const { rootTarget, folderTargets, albumTargets } = useMemo(() => {
+    let root = null
     if (depth > 0) {
-      targets.push({
+      root = {
         id: '__ROOT__',
         path: '__ROOT__',
         name: 'Nivel principal (raíz)',
         type: 'root',
         depth: 0
-      })
+      }
     }
+
+    const folders = []
+    const albums = []
 
     function traverse(nodes, d = 0) {
       if (!nodes || !Array.isArray(nodes)) return
       for (const item of nodes) {
         if (canDropIntoNode(node, item)) {
-          targets.push({
+          const entry = {
             id: item.id,
             path: item.path,
             name: item.name,
             type: item.type,
             cover: item.cover,
             depth: d
-          })
+          }
+          if (item.type === 'folder') {
+            folders.push(entry)
+          } else {
+            albums.push(entry)
+          }
         }
         if (item.children && Array.isArray(item.children)) {
           traverse(item.children, d + 1)
@@ -516,31 +794,105 @@ function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving
     }
 
     traverse(library, 0)
-    return targets
+    return { rootTarget: root, folderTargets: folders, albumTargets: albums }
   }, [library, node, depth])
 
-  const filtered = useMemo(() => {
+  // Filtrado de búsqueda
+  const { filteredRoot, filteredFolders, filteredAlbums } = useMemo(() => {
     const q = searchFilter.trim().toLowerCase()
-    if (!q) return availableDestinations
-    return availableDestinations.filter(
-      (d) => d.id === '__ROOT__' || d.name.toLowerCase().includes(q)
-    )
-  }, [availableDestinations, searchFilter])
+    if (!q) {
+      return {
+        filteredRoot: rootTarget,
+        filteredFolders: folderTargets,
+        filteredAlbums: albumTargets
+      }
+    }
+    const match = (item) => item.name.toLowerCase().includes(q)
+    return {
+      filteredRoot: rootTarget && match(rootTarget) ? rootTarget : null,
+      filteredFolders: folderTargets.filter(match),
+      filteredAlbums: albumTargets.filter(match)
+    }
+  }, [searchFilter, rootTarget, folderTargets, albumTargets])
+
+  const totalResults =
+    (filteredRoot ? 1 : 0) + filteredFolders.length + filteredAlbums.length
 
   const handleSubmit = (e) => {
-    e.preventDefault()
-    if (!selectedDestination || isMoving) return
-    onConfirm(node, selectedDestination)
+    if (e) e.preventDefault()
+    if (isMoving) return
+    let target = selectedDestination
+    if (!target && totalResults === 1) {
+      target = filteredRoot || filteredFolders[0] || filteredAlbums[0]
+    }
+    if (!target) return
+    onConfirm(node, target)
+  }
+
+  const handleDoubleClick = (dest) => {
+    if (isMoving) return
+    setSelectedDestination(dest)
+    onConfirm(node, dest)
+  }
+
+  const renderItem = (dest) => {
+    const isSelected = selectedDestination?.path === dest.path
+    return (
+      <div
+        key={dest.id}
+        className={`album-move-item ${isSelected ? 'selected' : ''}`}
+        onClick={() => setSelectedDestination(dest)}
+        onDoubleClick={() => handleDoubleClick(dest)}
+        title="Doble clic para mover inmediatamente aquí"
+      >
+        <span style={{ fontSize: '16px' }}>
+          {dest.type === 'root' ? '🏠' : dest.type === 'folder' ? '📁' : '💿'}
+        </span>
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <span
+            style={{
+              fontSize: '13px',
+              fontWeight: isSelected ? '700' : '500',
+              color: isSelected ? 'var(--accent)' : 'var(--text-primary)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}
+          >
+            {dest.name}
+          </span>
+          {dest.type === 'root' && (
+            <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+              Sacar fuera al nivel superior
+            </span>
+          )}
+        </div>
+        <span className="album-move-quick-hint">Doble clic para mover</span>
+        {isSelected && (
+          <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 'bold' }}>✓</span>
+        )}
+      </div>
+    )
   }
 
   const content = (
-    <div className="track-modal-backdrop" onClick={() => !isMoving && onClose()}>
+    <div
+      className="track-modal-backdrop"
+      onMouseDown={(e) => {
+        mouseDownTargetRef.current = e.target
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget && !isMoving) {
+          onClose()
+        }
+      }}
+    >
       <div className="track-modal-card album-move-card" onClick={(e) => e.stopPropagation()} role="dialog">
         <div className="track-modal-header">
           <div className="track-modal-title-group">
             <div className="track-modal-cover-placeholder">📁</div>
             <div>
-              <h3>Mover álbum o carpeta</h3>
+              <h3>Mover {node.type === 'folder' ? 'carpeta' : 'álbum'}</h3>
               <p className="track-modal-subtitle">Destino para "{node.name}"</p>
             </div>
           </div>
@@ -550,71 +902,48 @@ function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="track-modal-body" style={{ maxHeight: '340px', overflowY: 'auto' }}>
-            {availableDestinations.length > 5 && (
-              <input
-                ref={inputRef}
-                type="text"
-                className="create-album-input"
-                style={{ marginBottom: '10px' }}
-                placeholder="Filtrar destinos..."
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                disabled={isMoving}
-              />
-            )}
+          <div className="track-modal-body" style={{ maxHeight: '360px', overflowY: 'auto' }}>
+            <input
+              ref={inputRef}
+              type="text"
+              className="create-album-input"
+              style={{ marginBottom: '12px' }}
+              placeholder="Buscar carpeta de destino..."
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              disabled={isMoving}
+            />
 
-            {filtered.length === 0 ? (
+            {totalResults === 0 ? (
               <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
-                No hay otras carpetas o álbumes válidos disponibles para mover este elemento.
+                No se encontraron carpetas o álbumes válidos disponibles.
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {filtered.map((dest) => {
-                  const isSelected = selectedDestination?.path === dest.path
-                  return (
-                    <div
-                      key={dest.id}
-                      onClick={() => setSelectedDestination(dest)}
-                      style={{
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '10px',
-                        paddingLeft: `${12 + dest.depth * 14}px`,
-                        background: isSelected ? 'rgba(124, 92, 252, 0.22)' : 'var(--bg-tertiary, rgba(255,255,255,0.03))',
-                        border: isSelected ? '1px solid var(--accent)' : '1px solid transparent',
-                        transition: 'all 0.12s ease'
-                      }}
-                    >
-                      <span style={{ fontSize: '16px' }}>
-                        {dest.type === 'root' ? '🏠' : dest.type === 'folder' ? '📁' : '💿'}
-                      </span>
-                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <span style={{
-                          fontSize: '13px',
-                          fontWeight: isSelected ? '700' : '500',
-                          color: isSelected ? 'var(--accent)' : 'var(--text-primary)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis'
-                        }}>
-                          {dest.name}
-                        </span>
-                        {dest.type === 'root' && (
-                          <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
-                            Sacar fuera de subcarpetas al nivel superior
-                          </span>
-                        )}
-                      </div>
-                      {isSelected && (
-                        <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontWeight: 'bold' }}>✓</span>
-                      )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {filteredRoot && (
+                  <div>
+                    <div className="album-move-section-title">Nivel Superior</div>
+                    {renderItem(filteredRoot)}
+                  </div>
+                )}
+
+                {filteredFolders.length > 0 && (
+                  <div>
+                    <div className="album-move-section-title">Carpetas Padre (Contenedoras)</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {filteredFolders.map(renderItem)}
                     </div>
-                  )
-                })}
+                  </div>
+                )}
+
+                {filteredAlbums.length > 0 && (
+                  <div>
+                    <div className="album-move-section-title">Otros Álbumes</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {filteredAlbums.map(renderItem)}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -651,6 +980,7 @@ function Sidebar({ isOpen = true, onToggle }) {
     setSelectedAlbum,
     isLoading,
     createAlbum,
+    createFolder,
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder
@@ -664,6 +994,10 @@ function Sidebar({ isOpen = true, onToggle }) {
   const [newAlbumName, setNewAlbumName] = useState('')
   const [isSubmittingAlbum, setIsSubmittingAlbum] = useState(false)
   const createInputRef = useRef(null)
+
+  // Estado para modal de creación de elementos (álbum o carpeta padre)
+  const [createModalState, setCreateModalState] = useState(null) // { mode: 'album' | 'folder', parentDir, locationLabel }
+  const [isCreatingItem, setIsCreatingItem] = useState(false)
 
   // Estado para Drag & Drop basado en Pointer Events (100% fiable y fluido)
   const [dragState, setDragState] = useState(null) // { node, depth, x, y, targetId, targetName, targetPath }
@@ -684,7 +1018,7 @@ function Sidebar({ isOpen = true, onToggle }) {
   }, [Boolean(dragState)])
 
   // Estados para Clic Derecho en Álbum (Menú Contextual, Mover, Renombrar, Eliminar)
-  const [albumContextMenu, setAlbumContextMenu] = useState(null) // { node, position, depth }
+  const [albumContextMenu, setAlbumContextMenu] = useState(null) // { node, position, depth, isBackground }
   const [moveTargetNode, setMoveTargetNode] = useState(null) // { node, depth }
   const [isMovingAlbum, setIsMovingAlbum] = useState(false)
   const [renameTargetNode, setRenameTargetNode] = useState(null)
@@ -741,6 +1075,54 @@ function Sidebar({ isOpen = true, onToggle }) {
       setIsSubmittingAlbum(false)
     }
   }
+
+  // Apertura del modal de creación de álbum o carpeta padre
+  const handleOpenCreateModal = useCallback((mode, parentDir = '__ROOT__', locationLabel = 'Nivel principal') => {
+    setCreateModalState({ mode, parentDir, locationLabel })
+  }, [])
+
+  // Confirmar creación de álbum o carpeta padre desde modal
+  const handleConfirmCreateItem = useCallback(async (mode, name, parentDir) => {
+    setIsCreatingItem(true)
+    try {
+      if (mode === 'folder') {
+        const res = await createFolder(name, parentDir)
+        if (res && res.success) {
+          showSidebarNotice(`📁 Carpeta "${res.folderName || name}" creada`)
+          if (parentDir && parentDir !== '__ROOT__') {
+            setExpandedFolders((prev) => ({ ...prev, [parentDir]: true }))
+          }
+          setCreateModalState(null)
+        } else {
+          showSidebarNotice(`⚠ ${res?.error || 'No se pudo crear la carpeta'}`)
+        }
+      } else {
+        const res = await createAlbum(name, parentDir)
+        if (res && res.success) {
+          showSidebarNotice(`✓ Álbum "${res.albumName || name}" creado`)
+          if (parentDir && parentDir !== '__ROOT__') {
+            setExpandedFolders((prev) => ({ ...prev, [parentDir]: true }))
+          }
+          setCreateModalState(null)
+        } else {
+          showSidebarNotice(`⚠ ${res?.error || 'No se pudo crear el álbum'}`)
+        }
+      }
+    } finally {
+      setIsCreatingItem(false)
+    }
+  }, [createAlbum, createFolder, showSidebarNotice])
+
+  // Clic derecho en el fondo vacío de la lista
+  const handleBackgroundContextMenu = useCallback((e) => {
+    e.preventDefault()
+    setAlbumContextMenu({
+      node: null,
+      position: { x: e.clientX, y: e.clientY },
+      depth: 0,
+      isBackground: true
+    })
+  }, [])
 
   const handleMoveToRoot = useCallback(async (nodeToMove) => {
     if (!nodeToMove?.path) return
@@ -944,7 +1326,7 @@ function Sidebar({ isOpen = true, onToggle }) {
 
   // Clic derecho en un nodo de álbum o carpeta
   const handleContextMenuNode = useCallback((node, position, depth = 0) => {
-    setAlbumContextMenu({ node, position, depth })
+    setAlbumContextMenu({ node, position, depth, isBackground: false })
   }, [])
 
   // Confirmar renombrar álbum
@@ -1097,6 +1479,7 @@ function Sidebar({ isOpen = true, onToggle }) {
 
       <div
         className={`album-list ${dragState ? 'is-dragging-active' : ''} ${dragState?.targetId === '__ROOT__' ? 'root-drag-active' : ''}`}
+        onContextMenu={handleBackgroundContextMenu}
       >
         {/* Elemento especial arriba del todo: Crear álbum */}
         <div className={`create-album-card ${isCreatingAlbum ? 'editing' : ''}`}>
@@ -1238,17 +1621,32 @@ function Sidebar({ isOpen = true, onToggle }) {
         document.body
       )}
 
-      {/* Menú Contextual de Álbum (Clic derecho) */}
+      {/* Menú Contextual de Álbum o Carpeta (Clic derecho) */}
       {albumContextMenu && (
         <AlbumContextMenu
           node={albumContextMenu.node}
           position={albumContextMenu.position}
           depth={albumContextMenu.depth || 0}
+          isBackground={albumContextMenu.isBackground}
           onClose={() => setAlbumContextMenu(null)}
+          onCreateAlbum={(pDir, loc) => handleOpenCreateModal('album', pDir, loc)}
+          onCreateFolder={(pDir, loc) => handleOpenCreateModal('folder', pDir, loc)}
           onOpenMove={(n, d) => setMoveTargetNode({ node: n, depth: d })}
           onMoveToRoot={(n) => handleMoveToRoot(n)}
           onRename={(n) => setRenameTargetNode(n)}
           onDelete={(n) => setDeleteTargetNode(n)}
+        />
+      )}
+
+      {/* Modal para Crear Álbum o Carpeta Padre */}
+      {createModalState && (
+        <CreateItemModal
+          mode={createModalState.mode}
+          parentDir={createModalState.parentDir}
+          locationLabel={createModalState.locationLabel}
+          onClose={() => setCreateModalState(null)}
+          onConfirm={handleConfirmCreateItem}
+          isCreating={isCreatingItem}
         />
       )}
 

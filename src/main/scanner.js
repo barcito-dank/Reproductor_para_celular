@@ -532,12 +532,14 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
     }
   }
 
-  // Caso 1: Carpeta sin subdirectorios (Álbum clásico, incluyendo álbumes recién creados vacíos)
-  if (subDirs.length === 0) {
+  const hasFolderMarker = entries.some((e) => e.name === '.parent_folder' || e.name === '.folder')
+
+  // Caso 1: Carpeta sin subdirectorios que NO está marcada como carpeta padre (Álbum clásico)
+  if (subDirs.length === 0 && !hasFolderMarker) {
     return createAlbumFromFiles(dir, dirName, dir, directAudioFiles, parentPathName, entries, true)
   }
 
-  // Caso 2: Carpeta con subdirectorios (Barra desplegable)
+  // Caso 2: Carpeta padre (con subdirectorios o marcada como carpeta contenedora de álbumes)
   const children = []
 
   // Si tiene canciones directamente en esta carpeta, crear un álbum hijo para ellas
@@ -564,7 +566,7 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
     if (childNode) children.push(childNode)
   }
 
-  if (children.length === 0) return null
+  if (children.length === 0 && !hasFolderMarker) return null
 
   // Ordenar hijos: carpetas primero y luego alfabéticamente
   children.sort((a, b) => {
@@ -738,8 +740,13 @@ async function scanMusicDirectory(baseDir, userDataDir = null) {
 
   const tree = nodes.filter(Boolean)
 
-  // Ordenar árbol alfabéticamente
-  tree.sort((a, b) => a.name.localeCompare(b.name))
+  // Ordenar árbol: carpetas padre primero y luego el resto de álbumes, manteniendo orden alfabético
+  tree.sort((a, b) => {
+    if (a.type !== b.type) {
+      return a.type === 'folder' ? -1 : 1
+    }
+    return (a.name || '').localeCompare(b.name || '')
+  })
 
   // Anotación en memoria imprescindible para el árbol
   const persistedIndex = annotateSongAlbumsModel(tree)

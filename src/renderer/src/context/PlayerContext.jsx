@@ -198,10 +198,16 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   // Pistas deduplicadas memorizadas para SpotlightSearch y vistas rápidas
   const allTracks = useMemo(() => allTracksAlbum?.tracks || [], [allTracksAlbum])
 
-  // Biblioteca final incluyendo el álbum "Todos" al principio
+  // Biblioteca final: álbum "Todos" primero, seguido de carpetas padre y resto de álbumes en orden alfabético
   const library = useMemo(() => {
-    if (!allTracksAlbum) return rawLibrary
-    return [allTracksAlbum, ...rawLibrary]
+    const sorted = [...rawLibrary].sort((a, b) => {
+      if (a.type !== b.type) {
+        return a.type === 'folder' ? -1 : 1
+      }
+      return (a.name || '').localeCompare(b.name || '')
+    })
+    if (!allTracksAlbum) return sorted
+    return [allTracksAlbum, ...sorted]
   }, [allTracksAlbum, rawLibrary])
 
   const lastTimeSyncRef = useRef(0)
@@ -979,11 +985,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (isMiniPanel || !('mediaSession' in navigator)) return
 
     if (currentTrack) {
+      // W3C MediaSession solo acepta esquemas http, https, data o blob para artwork
+      const hasValidMediaScheme = currentTrack.cover && /^(https?|data|blob):/i.test(currentTrack.cover)
       navigator.mediaSession.metadata = new MediaMetadata({
         title: currentTrack.title || 'Canción',
         artist: currentTrack.artist || 'Artista Desconocido',
         album: currentAlbum?.name || currentTrack.albumName || '',
-        artwork: currentTrack.cover
+        artwork: hasValidMediaScheme
           ? [
               { src: currentTrack.cover, sizes: '96x96' },
               { src: currentTrack.cover, sizes: '128x128' },
@@ -1216,6 +1224,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       const info = getTrackAlbumInfo(track)
       const isLastAlbumLink = (info?.albumCount || 1) <= 1
       const forceDeleteMaster = Boolean(options.forceDeleteMaster ?? isLastAlbumLink)
+      const skipScan = Boolean(options.skipScan)
 
       const audio = audioRef.current
       if (currentTrack && (currentTrack.id === track.id || currentTrack.path === track.path)) {
@@ -1224,6 +1233,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         setIsPlaying(false)
         audio.removeAttribute('src')
         audio.load()
+        // Breve espera para que Chromium y Windows liberen el handle de audio en disco
+        await new Promise((r) => setTimeout(r, 40))
         if (remaining.length > 0) {
           const nextIdx = Math.min(Math.max(0, playlistIndex), remaining.length - 1)
           const replacement = remaining[nextIdx]
@@ -1243,6 +1254,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       const result = await window.electronAPI.deleteTrackFile({
         filePath: track.path,
         forceDeleteMaster,
+        skipScan,
         selectedDirectory: musicDirectory || undefined
       })
 
@@ -1276,6 +1288,11 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       })
 
       let trackToDelete = copy?.track
+      const copyPath = copy?.filePath || copy?.track?.path
+
+      if (!trackToDelete && copyPath) {
+        trackToDelete = { ...track, path: copyPath, id: copyPath }
+      }
 
       // 2. Si no se encontró en info.copies, buscar en los tracks cargados del álbum destino
       if (!trackToDelete && targetAlbum.tracks) {
@@ -1335,7 +1352,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       const pathsToDelete = new Set()
       if (track.path) pathsToDelete.add(track.path)
       for (const copy of copies) {
-        if (copy.track?.path) pathsToDelete.add(copy.track.path)
+        const copyPath = copy.filePath || copy.track?.path
+        if (copyPath) pathsToDelete.add(copyPath)
       }
 
       // Si la pista que se está reproduciendo coincide con alguna de las copias
@@ -1343,7 +1361,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       const isCurrentlyPlaying = currentTrack && (
         currentTrack.id === track.id ||
         pathsToDelete.has(currentTrack.path) ||
-        copies.some((c) => c.track?.id === currentTrack.id)
+        copies.some((c) => (c.track?.id && c.track.id === currentTrack.id) || (c.filePath && c.filePath === currentTrack.path))
       )
 
       if (isCurrentlyPlaying) {
@@ -1352,6 +1370,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         setIsPlaying(false)
         audio.removeAttribute('src')
         audio.load()
+        await new Promise((r) => setTimeout(r, 40))
         if (remaining.length > 0) {
           const nextIdx = Math.min(Math.max(0, playlistIndex), remaining.length - 1)
           const replacement = remaining[nextIdx]
@@ -1376,6 +1395,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         lastResult = await window.electronAPI.deleteTrackFile({
           filePath,
           forceDeleteMaster: isFinalLink,
+          skipScan: !isFinalLink,
           selectedDirectory: musicDirectory || undefined
         })
       }
@@ -1411,6 +1431,25 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       return result || { success: false }
     } catch (err) {
       console.error('Error creando álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory])
+
+  // Crear una nueva carpeta padre (carpeta contenedora de álbumes)
+  const createFolder = useCallback(async (folderName, parentDir = null) => {
+    if (!folderName || !window.electronAPI?.createFolder) return { success: false }
+    try {
+      const result = await window.electronAPI.createFolder({
+        folderName,
+        parentDir,
+        selectedDirectory: musicDirectory || undefined
+      })
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+      }
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error creando carpeta padre:', err)
       return { success: false, error: err.message }
     }
   }, [musicDirectory])
@@ -1692,6 +1731,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     deleteTrackFromAllAlbums,
     updateTrackTags,
     createAlbum,
+    createFolder,
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,
@@ -1713,6 +1753,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     deleteTrackFromAllAlbums,
     updateTrackTags,
     createAlbum,
+    createFolder,
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,

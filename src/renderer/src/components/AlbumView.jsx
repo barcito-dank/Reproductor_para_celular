@@ -815,6 +815,8 @@ function TrackEditModal({ track, albumInfo, onClose, onOpenFolder, onSave }) {
 }
 
 function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
+  const mouseDownTargetRef = useRef(null)
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && !isDeleting) onCancel()
@@ -832,8 +834,24 @@ function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
 
   if (!track) return null
 
+  const handleBackdropMouseDown = (e) => {
+    mouseDownTargetRef.current = e.target
+  }
+
+  const handleBackdropClick = (e) => {
+    // Solo cerrar si tanto el mousedown como el click se originaron en el fondo exterior (backdrop)
+    // Previene cancelaciones espontáneas provocadas por clics previos de menú contextual o arrastre
+    if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget && !isDeleting) {
+      onCancel()
+    }
+  }
+
   const modalContent = (
-    <div className="track-modal-backdrop" onClick={() => !isDeleting && onCancel()}>
+    <div
+      className="track-modal-backdrop"
+      onMouseDown={handleBackdropMouseDown}
+      onClick={handleBackdropClick}
+    >
       <div
         className="track-modal-card confirm-delete-card"
         onClick={(e) => e.stopPropagation()}
@@ -1196,7 +1214,9 @@ function AlbumView() {
     playTrack(track, selectedAlbum, displayTracks, idx)
   }, [playTrack, selectedAlbum, displayTracks])
 
-  if (isLoading) {
+  // Si está cargando o la biblioteca ya existe pero aún se está resolviendo atómicamente el álbum inicial,
+  // mantener la vista de carga para evitar el parpadeo (FOUC) de "Bienvenido a tu Música"
+  if (isLoading || (!selectedAlbum && library.length > 0)) {
     return (
       <div className="loading-view">
         <div className="spinner" />
@@ -1448,11 +1468,24 @@ function AlbumView() {
           onOpenProperties={(t) => setPropertiesTrack(t)}
           onRequestDelete={(t, mode = 'single') => {
             const albumInfo = getTrackAlbumInfo(t)
+            const count = albumInfo?.albumCount || 1
+            const isSingleMode = mode === 'single'
+            const isVirtualAll = Boolean(selectedAlbum?.isAllTracks)
+
+            // Eliminación simple de solo un álbum: si la canción existe en 2 o más álbumes y estamos en un álbum específico,
+            // no necesita confirmación; se quita de inmediato del álbum actual.
+            if (isSingleMode && count > 1 && !isVirtualAll && selectedAlbum) {
+              handleRemoveTrackFromSingleAlbum(t, selectedAlbum)
+              return
+            }
+
+            // Requiere confirmación si es su único enlace en la biblioteca (se borraría de Canciones_reales),
+            // o si estamos en la vista global "Todos", o si se eligió explícitamente "Eliminar de todos los álbumes".
             setDeleteTargetTrack({
               track: t,
               album: selectedAlbum,
               mode,
-              isLastAlbum: (albumInfo?.albumCount || 1) <= 1,
+              isLastAlbum: count <= 1 || isVirtualAll,
               albumNames: albumInfo?.albumNames || []
             })
           }}
