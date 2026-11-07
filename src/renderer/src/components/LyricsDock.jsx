@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { usePlayerTime } from '../context/PlayerContext'
+import { usePlayer, usePlayerTime } from '../context/PlayerContext'
 
 function formatSeconds(sec) {
   if (sec === undefined || sec === null || isNaN(sec)) return ''
@@ -9,45 +9,25 @@ function formatSeconds(sec) {
 }
 
 /**
- * Dock interactivo de letras sincronizadas (LRC / ID3).
- * Soporta modo compacto de 3 líneas con efecto de profundidad (pasada, actual y siguiente)
- * y modo expandido con scroll automático y salto a estrofa con un clic (seek on click).
+ * Dock interactivo de letras sincronizadas (LRC / ID3 / Online Temporal).
+ * Soporta modo compacto de 3 líneas con efecto de profundidad (pasada, actual y siguiente),
+ * modo expandido con scroll automático y estado en tiempo real de búsqueda online.
  */
 export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
+  const {
+    currentLyrics,
+    saveCurrentLyricsToDisk,
+    deleteCurrentLyricsFromDisk,
+    retryOnlineLyrics
+  } = usePlayer()
   const { currentTime } = usePlayerTime()
-  const [lyricsData, setLyricsData] = useState({ synced: false, lines: [] })
-  const [loading, setLoading] = useState(false)
   const [isExpanded, setIsExpanded] = useState(false)
+  const [actionFeedback, setActionFeedback] = useState(null)
   const activeLineRef = useRef(null)
   const expandedListRef = useRef(null)
 
-  // Cargar letras cuando cambia la pista actual
   useEffect(() => {
-    let active = true
-    if (!currentTrack?.path || !window.electronAPI?.getTrackLyrics) {
-      setLyricsData({ synced: false, lines: [] })
-      return
-    }
-
-    setLoading(true)
-    window.electronAPI
-      .getTrackLyrics(currentTrack.path)
-      .then((res) => {
-        if (active) {
-          setLyricsData(res || { synced: false, lines: [] })
-          setLoading(false)
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setLyricsData({ synced: false, lines: [] })
-          setLoading(false)
-        }
-      })
-
-    return () => {
-      active = false
-    }
+    setActionFeedback(null)
   }, [currentTrack?.path])
 
   // Cerrar con Escape
@@ -72,14 +52,19 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
 
   if (!isOpen) return null
 
-  const hasLines = lyricsData.lines && lyricsData.lines.length > 0
-  const isSynced = lyricsData.synced && hasLines
+  const status = currentLyrics?.status || 'idle'
+  const isLoadingLyrics = status === 'loading' || status === 'searching-online'
+  const lines = currentLyrics?.lines || []
+  const hasLines = lines.length > 0
+  const isSynced = Boolean(currentLyrics?.synced && hasLines)
+  const isTemporary = hasLines && !currentLyrics?.savedToDisk
+  const isSavedOnDisk = hasLines && Boolean(currentLyrics?.savedToDisk)
 
   // Calcular índice de la línea activa en base al tiempo actual
   let activeIndex = -1
   if (isSynced) {
-    for (let i = 0; i < lyricsData.lines.length; i++) {
-      if (currentTime >= lyricsData.lines[i].time) {
+    for (let i = 0; i < lines.length; i++) {
+      if (currentTime >= lines[i].time) {
         activeIndex = i
       } else {
         break
@@ -87,23 +72,39 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
     }
   }
 
-  const pastLine = activeIndex > 0 ? lyricsData.lines[activeIndex - 1] : null
+  const pastLine = activeIndex > 0 ? lines[activeIndex - 1] : null
   const currentLine =
     activeIndex >= 0
-      ? lyricsData.lines[activeIndex]
+      ? lines[activeIndex]
       : hasLines
       ? { text: '♪ ... ♪', time: 0, isIntro: true }
       : null
   const nextLine =
-    activeIndex + 1 < lyricsData.lines.length
-      ? lyricsData.lines[activeIndex + 1]
+    activeIndex + 1 < lines.length
+      ? lines[activeIndex + 1]
       : activeIndex === -1 && hasLines
-      ? lyricsData.lines[0]
+      ? lines[0]
       : null
 
   const handleLineClick = (line) => {
     if (line && line.time !== undefined && !line.isIntro) {
       seekTo(line.time)
+    }
+  }
+
+  const handleSaveLrc = async () => {
+    const ok = await saveCurrentLyricsToDisk()
+    if (ok) {
+      setActionFeedback('Guardada en .lrc')
+      setTimeout(() => setActionFeedback(null), 2200)
+    }
+  }
+
+  const handleDeleteLrc = async () => {
+    const ok = await deleteCurrentLyricsFromDisk()
+    if (ok) {
+      setActionFeedback('Archivo .lrc eliminado')
+      setTimeout(() => setActionFeedback(null), 2200)
     }
   }
 
@@ -114,7 +115,7 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
       aria-label="Panel de letras"
       onClick={(e) => e.stopPropagation()}
     >
-      {/* Barra superior con título y controles */}
+      {/* Barra superior con título, estado y controles */}
       <div className="lyrics-dock-header">
         <div className="lyrics-dock-title-group">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -125,10 +126,65 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
           <span className="lyrics-dock-track-title">
             {currentTrack?.title || 'Letras'}
           </span>
-          {isSynced && <span className="lyrics-synced-badge">Sincronizada</span>}
+          {isLoadingLyrics && (
+            <span className="lyrics-synced-badge searching">
+              {status === 'searching-online' ? 'Buscando letra...' : 'Cargando...'}
+            </span>
+          )}
+          {!isLoadingLyrics && isTemporary && (
+            <span className="lyrics-synced-badge temp" title="Letra temporal en memoria (no modifica tus archivos)">
+              Temporal
+            </span>
+          )}
+          {!isLoadingLyrics && isSavedOnDisk && (
+            <span className="lyrics-synced-badge" title="Letra guardada en archivo .lrc local">
+              {isSynced ? 'Sincronizada (.lrc)' : 'Local'}
+            </span>
+          )}
+          {actionFeedback && (
+            <span className="lyrics-synced-badge feedback">{actionFeedback}</span>
+          )}
         </div>
 
         <div className="lyrics-dock-controls">
+          {!isLoadingLyrics && isTemporary && currentLyrics?.raw && (
+            <button
+              type="button"
+              className="lyrics-dock-action-pill"
+              onClick={handleSaveLrc}
+              title="Guardar esta letra como archivo .lrc permanente para esta canción"
+            >
+              💾 Guardar .lrc
+            </button>
+          )}
+
+          {!isLoadingLyrics && isSavedOnDisk && (
+            <button
+              type="button"
+              className="lyrics-dock-action-pill danger"
+              onClick={handleDeleteLrc}
+              title="Eliminar archivo .lrc local si la versión de la letra no coincide"
+            >
+              🗑️ Quitar .lrc
+            </button>
+          )}
+
+          {!isLoadingLyrics && currentTrack?.path && (
+            <button
+              type="button"
+              className="lyrics-dock-btn"
+              onClick={retryOnlineLyrics}
+              title="Volver a buscar letra en línea (LRCLIB)"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                <path d="M16 16h5v5" />
+              </svg>
+            </button>
+          )}
+
           {hasLines && (
             <button
               type="button"
@@ -165,20 +221,32 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
 
       {/* Cuerpo del dock */}
       <div className="lyrics-dock-body">
-        {loading ? (
+        {isLoadingLyrics ? (
           <div className="lyrics-loading">
             <div className="lyrics-spinner" />
-            <span>Cargando letras...</span>
+            <span>
+              {status === 'searching-online'
+                ? 'Cargando contenido · Buscando letra sincronizada en línea...'
+                : 'Cargando contenido de letra...'}
+            </span>
           </div>
         ) : !hasLines ? (
-          /* En caso que no se encuentren letras no se muestra nada adicional */
           <div className="lyrics-empty-notice">
-            <span>Sin letra disponible</span>
+            <span>Sin letra disponible para esta versión</span>
+            {currentTrack?.path && (
+              <button
+                type="button"
+                className="lyrics-retry-inline-btn"
+                onClick={retryOnlineLyrics}
+              >
+                🔍 Buscar en línea ahora
+              </button>
+            )}
           </div>
         ) : isExpanded ? (
           /* Modo expandido: Scroll de todas las líneas */
           <div className="lyrics-expanded-scroll" ref={expandedListRef}>
-            {lyricsData.lines.map((line, idx) => {
+            {lines.map((line, idx) => {
               const isCurrent = isSynced && idx === activeIndex
               return (
                 <div

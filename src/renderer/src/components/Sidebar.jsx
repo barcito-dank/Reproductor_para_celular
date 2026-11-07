@@ -76,6 +76,7 @@ const TreeNode = React.memo(function TreeNode({
           data-album-id={node.id}
           data-album-path={node.path || ''}
           data-album-name={node.name}
+          data-album-type="folder"
           data-is-all-tracks="false"
           className={`folder-header-bar ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
           onContextMenu={handleContextMenu}
@@ -150,6 +151,7 @@ const TreeNode = React.memo(function TreeNode({
       data-album-id={node.id}
       data-album-path={node.path || ''}
       data-album-name={node.name}
+      data-album-type="album"
       data-is-all-tracks={isAllTracks ? 'true' : 'false'}
       className={`album-item ${isSelected ? 'active' : ''} ${isAllTracks ? 'album-item-all-tracks' : ''} depth-${depth} ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
       onContextMenu={handleContextMenu}
@@ -249,7 +251,7 @@ function AlbumContextMenu({
   onRename,
   onDelete,
   onOpenMove,
-  onMoveToRoot
+  onMoveUpOneLevel
 }) {
   const menuRef = useRef(null)
 
@@ -417,11 +419,11 @@ function AlbumContextMenu({
           className="album-context-item"
           onClick={() => {
             onClose()
-            onMoveToRoot(node)
+            onMoveUpOneLevel(node, depth)
           }}
         >
           <span className="album-context-icon">⬆️</span>
-          <span>Sacar a nivel raíz</span>
+          <span>Sacar un nivel encima</span>
         </button>
       )}
 
@@ -1055,6 +1057,18 @@ function Sidebar({ isOpen = true, onToggle }) {
     }))
   }, [])
 
+  // Auto-expandir carpeta cuando se arrastra una pista sobre ella
+  useEffect(() => {
+    const handleExpandFolder = (e) => {
+      const folderId = e.detail?.folderId
+      if (folderId) {
+        setExpandedFolders((prev) => ({ ...prev, [folderId]: true }))
+      }
+    }
+    window.addEventListener('sidebar-expand-folder', handleExpandFolder)
+    return () => window.removeEventListener('sidebar-expand-folder', handleExpandFolder)
+  }, [])
+
   // Crear nuevo álbum desde el elemento superior
   const handleCreateAlbumSubmit = async (e) => {
     if (e) e.preventDefault()
@@ -1133,6 +1147,28 @@ function Sidebar({ isOpen = true, onToggle }) {
     if (res && res.success) {
       if (!res.unchanged) {
         showSidebarNotice(`⬆️ "${movingName}" movido al nivel principal`)
+      }
+    } else if (res?.error) {
+      showSidebarNotice(`⚠ ${res.error}`)
+    }
+  }, [moveAlbumFolder, showSidebarNotice])
+
+  // Sacar un álbum o subcarpeta un nivel por encima (al abuelo, o a la raíz si está en profundidad 1)
+  const handleMoveUpOneLevel = useCallback(async (nodeToMove, depth = 0) => {
+    if (!nodeToMove?.path) return
+    const movingName = nodeToMove.name
+    const sourcePath = nodeToMove.path
+
+    let targetParentDir = '__ROOT__'
+    if (depth > 1) {
+      const parentDir = getParentDirFromPath(sourcePath)
+      targetParentDir = getParentDirFromPath(parentDir)
+    }
+
+    const res = await moveAlbumFolder(sourcePath, targetParentDir)
+    if (res && res.success) {
+      if (!res.unchanged) {
+        showSidebarNotice(`⬆️ "${movingName}" sacado un nivel encima`)
       }
     } else if (res?.error) {
       showSidebarNotice(`⚠ ${res.error}`)
@@ -1632,7 +1668,7 @@ function Sidebar({ isOpen = true, onToggle }) {
           onCreateAlbum={(pDir, loc) => handleOpenCreateModal('album', pDir, loc)}
           onCreateFolder={(pDir, loc) => handleOpenCreateModal('folder', pDir, loc)}
           onOpenMove={(n, d) => setMoveTargetNode({ node: n, depth: d })}
-          onMoveToRoot={(n) => handleMoveToRoot(n)}
+          onMoveUpOneLevel={(n, d) => handleMoveUpOneLevel(n, d)}
           onRename={(n) => setRenameTargetNode(n)}
           onDelete={(n) => setDeleteTargetNode(n)}
         />

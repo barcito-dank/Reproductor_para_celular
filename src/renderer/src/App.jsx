@@ -6,43 +6,22 @@ import Player from './components/Player'
 import MiniPanel from './components/MiniPanel'
 import SpotlightSearch from './components/SpotlightSearch'
 import ToastNotification from './components/ToastNotification'
+import SettingsModal from './components/SettingsModal'
+import ExtractorModal from './components/ExtractorModal'
+import GameOverlay from './components/GameOverlay'
 
 function MainPlayerApp({ theme, onThemeChange }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
-  const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(false)
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
   const [isSpotlightOpen, setIsSpotlightOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const settingsMenuRef = useRef(null)
-  const { currentTrack, selectedAlbum, togglePlay, adjustVolume, musicDirectory, updateMusicDirectory } = usePlayer()
+  const [isExtractorOpen, setIsExtractorOpen] = useState(false)
+  const { currentTrack, selectedAlbum, togglePlay, adjustVolume, updateMusicDirectory } = usePlayer()
 
+  // Sincronizar visibilidad del Panel Lateral
   useEffect(() => {
-    if (!isSettingsOpen) return undefined
-
-    const handlePointerDown = (event) => {
-      if (!settingsMenuRef.current?.contains(event.target)) {
-        setIsSettingsOpen(false)
-      }
-    }
-    const handleKeyDown = (event) => {
-      if (event.key === 'Escape') setIsSettingsOpen(false)
-    }
-
-    document.addEventListener('pointerdown', handlePointerDown)
-    window.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
-      window.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isSettingsOpen])
-
-  // Sincronizar estado inicial de Always on Top y visibilidad del Panel Lateral
-  useEffect(() => {
-    if (window.electronAPI.getMainAlwaysOnTop) {
-      window.electronAPI.getMainAlwaysOnTop().then(setIsAlwaysOnTop).catch(console.error)
-    }
     let unsubPanelMode = null
-    if (window.electronAPI.onSidePanelMode) {
+    if (window.electronAPI?.onSidePanelMode) {
       unsubPanelMode = window.electronAPI.onSidePanelMode((mode) => {
         setIsSidePanelOpen(mode === 'expanded')
       })
@@ -52,16 +31,9 @@ function MainPlayerApp({ theme, onThemeChange }) {
     }
   }, [])
 
-  const handleToggleAlwaysOnTop = async () => {
-    if (window.electronAPI.toggleMainAlwaysOnTop) {
-      const state = await window.electronAPI.toggleMainAlwaysOnTop()
-      setIsAlwaysOnTop(state)
-    }
-  }
-
   const handleBrowseMusicDirectory = async () => {
     try {
-      const directory = await window.electronAPI.selectMusicDirectory()
+      const directory = await window.electronAPI?.selectMusicDirectory?.()
       if (directory) {
         await updateMusicDirectory(directory)
       }
@@ -77,6 +49,13 @@ function MainPlayerApp({ theme, onThemeChange }) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
         setIsSpotlightOpen(prev => !prev)
+        return
+      }
+
+      // Atajo Ctrl+D para Descargar / Pegar Enlace (Extractor)
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault()
+        setIsExtractorOpen(prev => !prev)
         return
       }
 
@@ -145,64 +124,30 @@ function MainPlayerApp({ theme, onThemeChange }) {
               <span>Panel Rápido</span>
             </button>
 
-            {/* Botón para Fijar ventana principal en primer plano */}
+            {/* Botón para invocar Extractor de Música (Descargar / Pegar Enlace) */}
             <button
-              className={`titlebar-pin-btn ${isAlwaysOnTop ? 'active-pin' : ''}`}
-              onClick={handleToggleAlwaysOnTop}
-              title={isAlwaysOnTop ? 'Ventana siempre visible: ACTIVADA (Prioridad sobre otras apps)' : 'Fijar ventana siempre encima'}
-              aria-pressed={isAlwaysOnTop}
+              className="titlebar-extractor-btn"
+              onClick={() => setIsExtractorOpen(true)}
+              title="Descargar o pegar enlace para extraer música con metadatos oficiales (YouTube, Spotify, TikTok)"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
               </svg>
-              <span>{isAlwaysOnTop ? 'Fijada' : 'Fijar'}</span>
+              <span>Descargar</span>
             </button>
 
-            <div className="settings-menu" ref={settingsMenuRef}>
-              <button
-                className={`titlebar-settings-btn ${isSettingsOpen ? 'active' : ''}`}
-                onClick={() => setIsSettingsOpen((open) => !open)}
-                title="Ajustes"
-                aria-label="Ajustes"
-                aria-expanded={isSettingsOpen}
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
-                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.94-.08-.02a1.7 1.7 0 0 0-1.77.49l-.06.06h-3.4l-.03-.08a1.7 1.7 0 0 0-1.43-1.14h-.08l-1.7-2.94.05-.06a1.7 1.7 0 0 0 .1-1.8l-.04-.07 1.7-2.94h.08a1.7 1.7 0 0 0 1.48-.98l.04-.08h3.4l.04.08a1.7 1.7 0 0 0 1.48.98h.08l1.7 2.94-.05.07A1.7 1.7 0 0 0 19.4 15Z" />
-                </svg>
-              </button>
-
-              {isSettingsOpen && (
-                <div className="settings-popover" role="dialog" aria-label="Ajustes de la aplicación">
-                  <div className="settings-popover-title">Ajustes</div>
-                  <button
-                    className="settings-option"
-                    onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')}
-                    aria-pressed={theme === 'light'}
-                  >
-                    <span className="settings-option-icon" aria-hidden="true">
-                      {theme === 'dark' ? '☀' : '☾'}
-                    </span>
-                    <span className="settings-option-label">
-                      <span>Tema</span>
-                      <span className="settings-option-description">{theme === 'dark' ? 'Oscuro' : 'Claro'}</span>
-                    </span>
-                    <span className={`settings-switch ${theme === 'light' ? 'enabled' : ''}`} aria-hidden="true">
-                      <span />
-                    </span>
-                  </button>
-                  <div className="settings-directory">
-                    <span className="settings-directory-label">Carpeta de música</span>
-                    <span className="settings-directory-value" title={musicDirectory || 'Ubicación automática'}>
-                      {musicDirectory || 'Ubicación automática'}
-                    </span>
-                    <button className="settings-browse-btn" onClick={handleBrowseMusicDirectory}>
-                      Examinar directorio
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Botón de Ajustes */}
+            <button
+              className={`titlebar-settings-btn ${isSettingsOpen ? 'active' : ''}`}
+              onClick={() => setIsSettingsOpen(true)}
+              title="Ajustes y configuración avanzada"
+              aria-label="Ajustes"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.94-.08-.02a1.7 1.7 0 0 0-1.77.49l-.06.06h-3.4l-.03-.08a1.7 1.7 0 0 0-1.43-1.14h-.08l-1.7-2.94.05-.06a1.7 1.7 0 0 0 .1-1.8l-.04-.07 1.7-2.94h.08a1.7 1.7 0 0 0 1.48-.98l.04-.08h3.4l.04.08a1.7 1.7 0 0 0 1.48.98h.08l1.7 2.94-.05.07A1.7 1.7 0 0 0 19.4 15Z" />
+              </svg>
+            </button>
           </div>
 
           <div className="titlebar-divider" aria-hidden="true" />
@@ -245,6 +190,21 @@ function MainPlayerApp({ theme, onThemeChange }) {
         isOpen={isSpotlightOpen}
         onClose={() => setIsSpotlightOpen(false)}
       />
+
+      {/* Modal de Ajustes y Configuración Avanzada */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        theme={theme}
+        onThemeChange={onThemeChange}
+        onBrowseDirectory={handleBrowseMusicDirectory}
+      />
+
+      {/* Modal para Invocar al Extractor de Música */}
+      <ExtractorModal
+        isOpen={isExtractorOpen}
+        onClose={() => setIsExtractorOpen(false)}
+      />
     </div>
   )
 }
@@ -252,6 +212,7 @@ function MainPlayerApp({ theme, onThemeChange }) {
 function App() {
   const isMini = window.location.hash === '#/mini'
   const isNotification = window.location.hash === '#/notification'
+  const isOverlay = window.location.hash === '#/overlay'
   const [theme, setTheme] = useState(() => {
     const savedTheme = window.localStorage.getItem('musicPlayerTheme')
     return savedTheme === 'light' ? 'light' : 'dark'
@@ -291,14 +252,22 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (isMini || isNotification) {
+    if (isMini || isNotification || isOverlay) {
       document.documentElement.style.background = 'transparent'
       document.body.style.background = 'transparent'
     }
-  }, [isMini, isNotification])
+  }, [isMini, isNotification, isOverlay])
 
   if (isNotification) {
     return <ToastNotification />
+  }
+
+  if (isOverlay) {
+    return (
+      <PlayerProvider isMiniPanel={true}>
+        <GameOverlay />
+      </PlayerProvider>
+    )
   }
 
   if (isMini) {

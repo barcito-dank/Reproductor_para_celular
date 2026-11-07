@@ -29,6 +29,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restoreMainWindow: () => ipcRenderer.send('restore-main-window'),
   toggleMainAlwaysOnTop: () => ipcRenderer.invoke('toggle-main-always-on-top'),
   getMainAlwaysOnTop: () => ipcRenderer.invoke('get-main-always-on-top'),
+  setMainAlwaysOnTop: (enabled) => ipcRenderer.invoke('set-main-always-on-top', enabled),
+
+  // Ajustes avanzados, Extractor e Integraciones
+  launchExtractor: (payload) => ipcRenderer.invoke('launch-extractor', payload),
+  checkHardlinksHealth: () => ipcRenderer.invoke('check-hardlinks-health'),
+  repairHardlinksIntegrity: () => ipcRenderer.invoke('repair-hardlinks-integrity'),
+  fetchTrackLyricsOnline: (payload) => ipcRenderer.invoke('fetch-track-lyrics-online', payload),
+  saveTrackLrc: (payload) => ipcRenderer.invoke('save-track-lrc', payload),
+  deleteTrackLrc: (payload) => ipcRenderer.invoke('delete-track-lrc', payload),
+  batchDownloadLyrics: () => ipcRenderer.invoke('batch-download-lyrics'),
+  setDiscordRpc: (enabled) => ipcRenderer.invoke('set-discord-rpc', enabled),
+  getDiscordRpcStatus: () => ipcRenderer.invoke('get-discord-rpc-status'),
+  toggleGameOverlay: (enabled) => ipcRenderer.invoke('toggle-game-overlay', enabled),
+  getGameOverlayStatus: () => ipcRenderer.invoke('get-game-overlay-status'),
+  onGameOverlayStatusChanged: (callback) => {
+    const handler = (_, active) => callback(Boolean(active))
+    ipcRenderer.on('game-overlay-status-changed', handler)
+    return () => ipcRenderer.removeListener('game-overlay-status-changed', handler)
+  },
   onMainWindowVisibility: (callback) => {
     const handler = (_, visible) => callback(visible)
     ipcRenderer.on('main-window-visibility', handler)
@@ -69,6 +88,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, visible) => callback(visible)
     ipcRenderer.on('marker-visibility', handler)
     return () => ipcRenderer.removeListener('marker-visibility', handler)
+  },
+
+  onAlwaysOnTopStatusChanged: (callback) => {
+    const handler = (_, status) => callback(status)
+    ipcRenderer.on('always-on-top-status-changed', handler)
+    return () => ipcRenderer.removeListener('always-on-top-status-changed', handler)
   },
 
   // Listeners & State

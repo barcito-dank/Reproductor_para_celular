@@ -31,7 +31,16 @@ export const HOTKEY_CONFIG = {
   volumeDown: ['Ctrl+Down', 'Ctrl+Alt+Down'],
   
   // Mostrar/ocultar panel lateral
-  togglePanel: ['Ctrl+Shift+M', 'Ctrl+Alt+M']
+  togglePanel: ['Ctrl+Shift+M', 'Ctrl+Alt+M'],
+
+  // Mostrar/ocultar HUD flotante de juego (Game Overlay)
+  toggleOverlay: ['Ctrl+Alt+H', 'Ctrl+Shift+H'],
+
+  // Abrir / Restaurar y enfocar la ventana principal
+  restoreMainWindow: ['Ctrl+Shift+R', 'Ctrl+Alt+R'],
+
+  // Fijar / Desfijar ventana principal en primer plano (Always on Top)
+  toggleAlwaysOnTop: ['Ctrl+Shift+F', 'Ctrl+Alt+F', 'Ctrl+Shift+T']
 }
 
 let registeredShortcuts = []

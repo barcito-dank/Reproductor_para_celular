@@ -1,15 +1,22 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu, clipboard } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
+import { spawn } from 'child_process'
 import { parseFile } from 'music-metadata'
 import NodeID3 from 'node-id3'
 import { scanMusicDirectory, removeFromMetadataCache } from './scanner'
 import { registerHotkeys, unregisterHotkeys, HOTKEY_CONFIG } from './hotkeys'
+import { discordRpc } from './discordRpc'
+import { runHardlinksHealthCheck, repairHardlinksIntegrity } from './hardlinksHealth'
+import { downloadTrackMetadataAndLyrics, saveTrackLrcFile, deleteTrackLrcFile } from './lyricsDownloader'
 
 let mainWindow = null
 let sidePanel = null
 let notificationWindow = null
+let overlayWindow = null
+let isOverlayLoaded = false
+let isGameOverlayEnabled = false
 let tray = null
 let dirWatcher = null
 let watcherDebounceTimer = null
@@ -291,14 +298,26 @@ function createMainWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null
-    if (sidePanel) {
-      sidePanel.close()
+    isGameOverlayEnabled = false
+    try { discordRpc.setEnabled(false) } catch (_) {}
+    if (sidePanel && !sidePanel.isDestroyed()) {
+      try { sidePanel.destroy() } catch (_) {}
       sidePanel = null
     }
-    if (notificationWindow) {
-      notificationWindow.close()
+    if (notificationWindow && !notificationWindow.isDestroyed()) {
+      try { notificationWindow.destroy() } catch (_) {}
       notificationWindow = null
     }
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      try { overlayWindow.destroy() } catch (_) {}
+      overlayWindow = null
+      isOverlayLoaded = false
+    }
+    if (tray && !tray.isDestroyed()) {
+      try { tray.destroy() } catch (_) {}
+      tray = null
+    }
+    app.quit()
   })
 }
 
@@ -473,6 +492,97 @@ function createNotificationWindow() {
     notificationWindow = null
     isNotifLoaded = false
   })
+}
+
+const OVERLAY_WIDTH = 340
+const OVERLAY_HEIGHT = 70
+
+function syncStateToOverlayWindow() {
+  if (!overlayWindow || overlayWindow.isDestroyed() || !isOverlayLoaded) return
+  if (lastPlayerState) {
+    overlayWindow.webContents.send('player-state-sync', {
+      ...lastPlayerState,
+      currentTime: lastCurrentTime,
+      playlist: lastPlaylist
+    })
+  }
+  overlayWindow.webContents.send('player-time-sync', lastCurrentTime)
+}
+
+function createOverlayWindow() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const { width } = primaryDisplay.workAreaSize
+  const { x: dispX, y: dispY } = primaryDisplay.bounds
+
+  isOverlayLoaded = false
+  overlayWindow = new BrowserWindow({
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    x: Math.round(dispX + (width - OVERLAY_WIDTH) / 2),
+    y: dispY + 28,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    show: false,
+    hasShadow: false,
+    webPreferences: {
+      preload: getPreloadPath(),
+      sandbox: false,
+      webSecurity: false,
+      backgroundThrottling: false
+    }
+  })
+
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+
+  overlayWindow.webContents.on('did-finish-load', () => {
+    isOverlayLoaded = true
+    syncStateToOverlayWindow()
+    if (isGameOverlayEnabled && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.showInactive()
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+    }
+  })
+
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    overlayWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '#/overlay')
+  } else {
+    overlayWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { hash: '/overlay' })
+  }
+
+  overlayWindow.on('closed', () => {
+    overlayWindow = null
+    isOverlayLoaded = false
+  })
+
+  return overlayWindow
+}
+
+function setGameOverlayState(targetEnabled) {
+  isGameOverlayEnabled = Boolean(targetEnabled)
+
+  if (isGameOverlayEnabled) {
+    createOverlayWindow()
+    if (isOverlayLoaded && overlayWindow && !overlayWindow.isDestroyed()) {
+      syncStateToOverlayWindow()
+      overlayWindow.showInactive()
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+    }
+  } else {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.hide()
+    }
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('game-overlay-status-changed', isGameOverlayEnabled)
+  }
+
+  return isGameOverlayEnabled
 }
 
 function showTrackNotification(track) {
@@ -1751,8 +1861,16 @@ ipcMain.on('player-state-update', (event, state) => {
   if (sidePanel && !sidePanel.isDestroyed()) {
     sidePanel.webContents.send('player-state-sync', state)
   }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('player-state-sync', state)
+  }
   if (mainWindow && !mainWindow.isDestroyed() && event.sender !== mainWindow.webContents) {
     mainWindow.webContents.send('player-state-sync', state)
+  }
+
+  // Actualizar Discord Rich Presence
+  if (state && (state.currentTrack !== undefined || state.isPlaying !== undefined)) {
+    discordRpc.updateTrack(state.currentTrack, state.isPlaying, lastCurrentTime)
   }
 
   updateTrayMenu()
@@ -1778,6 +1896,9 @@ ipcMain.on('player-time-update', (event, time) => {
   if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
     sidePanel.webContents.send('player-time-sync', time)
   }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('player-time-sync', time)
+  }
   if (mainWindow && !mainWindow.isDestroyed() && event.sender !== mainWindow.webContents) {
     mainWindow.webContents.send('player-time-sync', time)
   }
@@ -1799,6 +1920,9 @@ ipcMain.on('player-command', (event, command) => {
   if (sidePanel && !sidePanel.isDestroyed()) {
     sidePanel.webContents.send('player-command', command)
   }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send('player-command', command)
+  }
   if (notificationWindow && !notificationWindow.isDestroyed()) {
     notificationWindow.webContents.send('player-command', command)
   }
@@ -1808,18 +1932,171 @@ ipcMain.handle('toggle-main-always-on-top', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false
   const currentState = mainWindow.isAlwaysOnTop()
   const newState = !currentState
-  // Nivel 'pop-up-menu' mantiene la ventana sobre apps normales, pero debajo de notificaciones (nivel 1) y panel lateral (nivel 2)
   mainWindow.setAlwaysOnTop(newState, 'pop-up-menu')
   if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
     sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
     sidePanel.moveTop()
   }
+  mainWindow.webContents.send('always-on-top-status-changed', newState)
+  return newState
+})
+
+ipcMain.handle('set-main-always-on-top', (_, enabled) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  const newState = Boolean(enabled)
+  mainWindow.setAlwaysOnTop(newState, 'pop-up-menu')
+  if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
+    sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+    sidePanel.moveTop()
+  }
+  mainWindow.webContents.send('always-on-top-status-changed', newState)
   return newState
 })
 
 ipcMain.handle('get-main-always-on-top', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false
   return mainWindow.isAlwaysOnTop()
+})
+
+// --- Ajustes Avanzados: Extractor, Hard Links, Letras, Discord RPC y HUD Overlay ---
+
+ipcMain.handle('launch-extractor', async (_, payload) => {
+  const url = payload?.url
+  if (url && typeof url === 'string') {
+    clipboard.writeText(url)
+  }
+
+  const possiblePaths = [
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Extractor_Musica', 'Extractor_Musica.exe'),
+    'C:\\Users\\barre\\AppData\\Local\\Programs\\Extractor_Musica\\Extractor_Musica.exe',
+    'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\dist\\Extractor_Musica_Portable\\Extractor_Musica.exe'
+  ]
+
+  for (const exePath of possiblePaths) {
+    try {
+      await fs.promises.access(exePath)
+      const child = spawn(exePath, [], { detached: true, stdio: 'ignore' })
+      child.unref()
+      return { success: true, method: 'exe', path: exePath }
+    } catch (_) {}
+  }
+
+  // Fallback a script Python en PyCharmMiscProject
+  const pythonPath = 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\.venv\\Scripts\\python.exe'
+  const scriptPath = 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\main.py'
+  try {
+    await fs.promises.access(pythonPath)
+    await fs.promises.access(scriptPath)
+    const child = spawn(pythonPath, [scriptPath], {
+      cwd: 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica',
+      detached: true,
+      stdio: 'ignore'
+    })
+    child.unref()
+    return { success: true, method: 'python' }
+  } catch (err) {
+    return { success: false, error: 'No se encontró el ejecutable ni el entorno de Extractor_Musica' }
+  }
+})
+
+ipcMain.handle('check-hardlinks-health', async () => {
+  const musicDir = await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  return await runHardlinksHealthCheck(musicDir, realMusicDir)
+})
+
+ipcMain.handle('repair-hardlinks-integrity', async () => {
+  const musicDir = await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  const repairRes = await repairHardlinksIntegrity(musicDir, realMusicDir)
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+  return { ...repairRes, library }
+})
+
+ipcMain.handle('fetch-track-lyrics-online', async (_, { trackPath, title, artist, duration, saveToDisk = false, bypassCache = false }) => {
+  const res = await downloadTrackMetadataAndLyrics(trackPath, title, artist, duration, {
+    saveToDisk: Boolean(saveToDisk),
+    bypassCache: Boolean(bypassCache)
+  })
+  if (res?.lyricsFound && res.lyrics) {
+    return {
+      ...res,
+      parsed: parseLrcText(res.lyrics)
+    }
+  }
+  return res
+})
+
+ipcMain.handle('save-track-lrc', async (_, { trackPath, lyricsText }) => {
+  removeFromMetadataCache(trackPath)
+  const realMusicDir = await getRealMusicDirectory()
+  const res = await saveTrackLrcFile(trackPath, lyricsText, realMusicDir)
+  removeFromMetadataCache(trackPath)
+  return res
+})
+
+ipcMain.handle('delete-track-lrc', async (_, { trackPath }) => {
+  removeFromMetadataCache(trackPath)
+  const realMusicDir = await getRealMusicDirectory()
+  const res = await deleteTrackLrcFile(trackPath, realMusicDir)
+  removeFromMetadataCache(trackPath)
+  return res
+})
+
+ipcMain.handle('batch-download-lyrics', async () => {
+  const musicDir = await getMusicDirectory()
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+
+  const allTracks = []
+  function collect(nodes) {
+    if (!Array.isArray(nodes)) return
+    for (const n of nodes) {
+      if (n.type === 'album' && Array.isArray(n.tracks)) {
+        for (const t of n.tracks) {
+          if (!t.hasLyrics && t.path) allTracks.push(t)
+        }
+      }
+      if (n.children) collect(n.children)
+    }
+  }
+  collect(library)
+
+  let downloadedCount = 0
+  const limit = Math.min(allTracks.length, 30)
+  for (let i = 0; i < limit; i++) {
+    const t = allTracks[i]
+    try {
+      const res = await downloadTrackMetadataAndLyrics(t.path, t.title, t.artist, t.duration, { saveToDisk: true })
+      if (res?.lyricsFound) downloadedCount++
+      await new Promise((r) => setTimeout(r, 100))
+    } catch (_) {}
+  }
+
+  const updatedLibrary = await scanMusicDirectory(musicDir, userDataDir)
+  return { success: true, totalScanned: limit, downloadedCount, library: updatedLibrary }
+})
+
+ipcMain.handle('set-discord-rpc', (_, enabled) => {
+  discordRpc.setEnabled(enabled)
+  if (lastPlayerState?.currentTrack) {
+    discordRpc.updateTrack(lastPlayerState.currentTrack, lastPlayerState.isPlaying, lastCurrentTime)
+  }
+  return discordRpc.getStatus()
+})
+
+ipcMain.handle('get-discord-rpc-status', () => {
+  return discordRpc.getStatus()
+})
+
+ipcMain.handle('toggle-game-overlay', (_, enabled) => {
+  const nextState = typeof enabled === 'boolean' ? enabled : !isGameOverlayEnabled
+  return setGameOverlayState(nextState)
+})
+
+ipcMain.handle('get-game-overlay-status', () => {
+  return Boolean(isGameOverlayEnabled && overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible())
 })
 
 app.whenReady().then(() => {
@@ -1864,16 +2141,49 @@ app.whenReady().then(() => {
     playPause: () => sendCommand('toggle-play'),
     volumeUp: () => sendCommand('volume-up'),
     volumeDown: () => sendCommand('volume-down'),
-    togglePanel: () => toggleSidePanel()
+    togglePanel: () => toggleSidePanel(),
+    toggleOverlay: () => setGameOverlayState(!isGameOverlayEnabled),
+    restoreMainWindow: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore()
+        mainWindow.show()
+        mainWindow.focus()
+      }
+    },
+    toggleAlwaysOnTop: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const nextState = !mainWindow.isAlwaysOnTop()
+        mainWindow.setAlwaysOnTop(nextState, 'pop-up-menu')
+        if (sidePanel && !sidePanel.isDestroyed() && (isSidePanelExpanded || isMarkerShowing)) {
+          sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
+          sidePanel.moveTop()
+        }
+        mainWindow.webContents.send('always-on-top-status-changed', nextState)
+      }
+    }
   }
 
   registerHotkeys(hotkeyActions)
 })
 
 app.on('will-quit', () => {
+  isGameOverlayEnabled = false
+  try { discordRpc.setEnabled(false) } catch (_) {}
   if (dirWatcher) {
     try { dirWatcher.close() } catch (_) {}
     dirWatcher = null
+  }
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    try { overlayWindow.destroy() } catch (_) {}
+    overlayWindow = null
+  }
+  if (sidePanel && !sidePanel.isDestroyed()) {
+    try { sidePanel.destroy() } catch (_) {}
+    sidePanel = null
+  }
+  if (notificationWindow && !notificationWindow.isDestroyed()) {
+    try { notificationWindow.destroy() } catch (_) {}
+    notificationWindow = null
   }
   if (tray && !tray.isDestroyed()) {
     try { tray.destroy() } catch (_) {}

@@ -72,9 +72,11 @@ const TrackRow = React.memo(function TrackRow({
   albumCount,
   albumNamesText,
   isAlbumPickerOpen,
+  isDraggingThisTrack,
   onSelectTrack,
   onOpenAlbumPicker,
-  onContextMenuTrack
+  onContextMenuTrack,
+  onStartTrackDrag
 }) {
   const handleBookmarkClick = (e) => {
     e.stopPropagation()
@@ -100,16 +102,20 @@ const TrackRow = React.memo(function TrackRow({
 
   return (
     <li
-      className={`track-item ${isActive ? 'active' : ''}`}
-      onClick={() => onSelectTrack(track, index)}
+      className={`track-item ${isActive ? 'active' : ''} ${isDraggingThisTrack ? 'is-dragging-source' : ''}`}
+      onPointerDown={(e) => onStartTrackDrag?.(e, track, index)}
       onContextMenu={handleRowContextMenu}
+      title="Clic para reproducir · Arrastra a cualquier álbum para agregarlo"
     >
       {/* Número o Indicador de Ecualizador Animado */}
       <div className="track-number">
         {isActive ? (
           <AnimatedEqualizer isPaused={!isPlaying} />
         ) : (
-          <span className="track-index-num">{index + 1}</span>
+          <>
+            <span className="track-index-num">{index + 1}</span>
+            <span className="track-drag-handle" title="Arrastra a un álbum para agregarlo">⋮⋮</span>
+          </>
         )}
       </div>
 
@@ -967,6 +973,17 @@ function AlbumView() {
   const [feedbackBanner, setFeedbackBanner] = useState(null)
   const feedbackTimeoutRef = useRef(null)
 
+  // Drag & drop de pistas hacia cualquier álbum de la barra lateral
+  const isDraggingTrackRef = useRef(false)
+  const justFinishedDragRef = useRef(false)
+  const [trackDragState, setTrackDragState] = useState(null)
+
+  useEffect(() => {
+    return () => {
+      document.body.classList.remove('is-dragging-track')
+    }
+  }, [])
+
   const showFeedback = useCallback((message) => {
     if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current)
     setFeedbackBanner(message)
@@ -1214,6 +1231,177 @@ function AlbumView() {
     playTrack(track, selectedAlbum, displayTracks, idx)
   }, [playTrack, selectedAlbum, displayTracks])
 
+  // Iniciar Drag & Drop de pista hacia cualquier álbum en la barra lateral
+  const handleStartTrackDrag = useCallback((e, track, index) => {
+    if (e.button !== 0) return // Solo botón izquierdo
+    // Si el clic viene del botón de marcador u otro botón interactivo, ignorar
+    if (e.target.closest('button, .track-bookmark-btn, input')) return
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let hasStarted = false
+    let hoverFolderTimer = null
+    let lastHoveredFolderId = null
+    let currentHighlightedEl = null
+    const threshold = 5
+
+    const clearHighlight = () => {
+      if (currentHighlightedEl) {
+        currentHighlightedEl.classList.remove('track-drop-ready', 'track-drop-exists', 'track-drop-folder')
+        currentHighlightedEl = null
+      }
+    }
+
+    const handlePointerMove = (moveEvt) => {
+      const dist = Math.hypot(moveEvt.clientX - startX, moveEvt.clientY - startY)
+      if (!hasStarted && dist > threshold) {
+        hasStarted = true
+        isDraggingTrackRef.current = true
+        justFinishedDragRef.current = true
+        document.body.classList.add('is-dragging-track')
+      }
+
+      if (hasStarted) {
+        moveEvt.preventDefault()
+
+        const el = document.elementFromPoint(moveEvt.clientX, moveEvt.clientY)
+        const albumRow = el?.closest('[data-album-id]')
+
+        let targetAlbum = null
+        let isAlreadyInAlbum = false
+        let isHoveringFolder = false
+        let folderName = null
+
+        if (albumRow) {
+          const aId = albumRow.getAttribute('data-album-id')
+          const aName = albumRow.getAttribute('data-album-name')
+          const aPath = albumRow.getAttribute('data-album-path')
+          const aType = albumRow.getAttribute('data-album-type') || (albumRow.classList.contains('folder-header-bar') ? 'folder' : 'album')
+          const aIsAll = albumRow.getAttribute('data-is-all-tracks') === 'true'
+
+          if (aType === 'folder') {
+            isHoveringFolder = true
+            folderName = aName
+            if (lastHoveredFolderId !== aId) {
+              clearTimeout(hoverFolderTimer)
+              lastHoveredFolderId = aId
+              hoverFolderTimer = setTimeout(() => {
+                window.dispatchEvent(new CustomEvent('sidebar-expand-folder', { detail: { folderId: aId } }))
+              }, 400)
+            }
+
+            if (currentHighlightedEl !== albumRow) {
+              clearHighlight()
+              albumRow.classList.add('track-drop-folder')
+              currentHighlightedEl = albumRow
+            }
+          } else if (aType === 'album' && !aIsAll) {
+            clearTimeout(hoverFolderTimer)
+            lastHoveredFolderId = null
+
+            targetAlbum = allAlbums.find((a) => a.id === aId || (a.path && aPath && a.path.toLowerCase() === aPath.toLowerCase())) || {
+              id: aId,
+              name: aName,
+              path: aPath
+            }
+
+            const info = getTrackAlbumInfo(track)
+            isAlreadyInAlbum = Boolean(
+              info?.albumIdsSet?.has(aId) ||
+              info?.albumIds?.includes(aId) ||
+              (targetAlbum.tracks && targetAlbum.tracks.some((t) => t.id === track.id || t.path === track.path))
+            )
+
+            if (currentHighlightedEl !== albumRow) {
+              clearHighlight()
+              albumRow.classList.add(isAlreadyInAlbum ? 'track-drop-exists' : 'track-drop-ready')
+              currentHighlightedEl = albumRow
+            } else {
+              albumRow.classList.toggle('track-drop-ready', !isAlreadyInAlbum)
+              albumRow.classList.toggle('track-drop-exists', isAlreadyInAlbum)
+            }
+          } else {
+            clearTimeout(hoverFolderTimer)
+            lastHoveredFolderId = null
+            clearHighlight()
+          }
+        } else {
+          clearTimeout(hoverFolderTimer)
+          lastHoveredFolderId = null
+          clearHighlight()
+        }
+
+        setTrackDragState({
+          track,
+          x: moveEvt.clientX,
+          y: moveEvt.clientY,
+          targetAlbum,
+          isAlreadyInAlbum,
+          isHoveringFolder,
+          folderName
+        })
+      }
+    }
+
+    const handlePointerUp = async (upEvt) => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+      clearTimeout(hoverFolderTimer)
+      clearHighlight()
+      document.body.classList.remove('is-dragging-track')
+
+      const didDrag = hasStarted
+      setTrackDragState(null)
+      isDraggingTrackRef.current = false
+
+      if (!didDrag) {
+        // Clic simple: reproducir la pista
+        handleSelectTrack(track, index)
+        return
+      }
+
+      setTimeout(() => {
+        justFinishedDragRef.current = false
+      }, 150)
+
+      const el = document.elementFromPoint(upEvt.clientX, upEvt.clientY)
+      const albumRow = el?.closest('[data-album-id]')
+      if (!albumRow) return
+
+      const aType = albumRow.getAttribute('data-album-type') || (albumRow.classList.contains('folder-header-bar') ? 'folder' : 'album')
+      const aIsAll = albumRow.getAttribute('data-is-all-tracks') === 'true'
+      if (aType === 'album' && !aIsAll) {
+        const aId = albumRow.getAttribute('data-album-id')
+        const aName = albumRow.getAttribute('data-album-name')
+        const aPath = albumRow.getAttribute('data-album-path')
+
+        const targetAlbum = allAlbums.find((a) => a.id === aId || (a.path && aPath && a.path.toLowerCase() === aPath.toLowerCase())) || {
+          id: aId,
+          name: aName,
+          path: aPath
+        }
+
+        const info = getTrackAlbumInfo(track)
+        const isAlreadyInAlbum = Boolean(
+          info?.albumIdsSet?.has(aId) ||
+          info?.albumIds?.includes(aId) ||
+          (targetAlbum.tracks && targetAlbum.tracks.some((t) => t.id === track.id || t.path === track.path))
+        )
+
+        if (isAlreadyInAlbum) {
+          showFeedback(`ℹ "${track.title}" ya pertenece al álbum "${targetAlbum.name}"`)
+        } else {
+          await handleAddTrackToSingleAlbum(track, targetAlbum)
+        }
+      }
+    }
+
+    window.addEventListener('pointermove', handlePointerMove, { passive: false })
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+  }, [allAlbums, getTrackAlbumInfo, handleAddTrackToSingleAlbum, handleSelectTrack, showFeedback])
+
   // Si está cargando o la biblioteca ya existe pero aún se está resolviendo atómicamente el álbum inicial,
   // mantener la vista de carga para evitar el parpadeo (FOUC) de "Bienvenido a tu Música"
   if (isLoading || (!selectedAlbum && library.length > 0)) {
@@ -1415,9 +1603,11 @@ function AlbumView() {
               albumCount={albumCount}
               albumNamesText={albumNamesText}
               isAlbumPickerOpen={albumPickerState?.track?.id === track.id}
+              isDraggingThisTrack={trackDragState?.track?.id === track.id}
               onSelectTrack={handleSelectTrack}
               onOpenAlbumPicker={handleOpenAlbumPicker}
               onContextMenuTrack={handleOpenContextMenu}
+              onStartTrackDrag={handleStartTrackDrag}
             />
           )
         })}
@@ -1519,6 +1709,52 @@ function AlbumView() {
         <div className="track-action-feedback-toast" role="status">
           {feedbackBanner}
         </div>
+      )}
+
+      {/* Floating Ghost al arrastrar canción a un álbum */}
+      {trackDragState && typeof document !== 'undefined' && createPortal(
+        <div
+          className="track-drag-floating-ghost"
+          style={{
+            left: `${trackDragState.x + 16}px`,
+            top: `${trackDragState.y + 16}px`
+          }}
+        >
+          <div className="track-drag-ghost-cover">
+            {trackDragState.track.cover ? (
+              <img src={trackDragState.track.cover} alt="" />
+            ) : (
+              <span>🎵</span>
+            )}
+          </div>
+          <div className="track-drag-ghost-info">
+            <span className="track-drag-ghost-title">{trackDragState.track.title}</span>
+            <span className="track-drag-ghost-artist">{trackDragState.track.artist || 'Artista Desconocido'}</span>
+          </div>
+          <div className={`track-drag-ghost-action ${
+            trackDragState.targetAlbum && !trackDragState.isAlreadyInAlbum
+              ? 'ready'
+              : trackDragState.isAlreadyInAlbum
+              ? 'exists'
+              : trackDragState.isHoveringFolder
+              ? 'folder'
+              : ''
+          }`}>
+            {trackDragState.targetAlbum && !trackDragState.isAlreadyInAlbum && (
+              <>+ Agregar a "{trackDragState.targetAlbum.name}"</>
+            )}
+            {trackDragState.targetAlbum && trackDragState.isAlreadyInAlbum && (
+              <>✓ Ya está en "{trackDragState.targetAlbum.name}"</>
+            )}
+            {trackDragState.isHoveringFolder && (
+              <>📁 Abre "{trackDragState.folderName}"</>
+            )}
+            {!trackDragState.targetAlbum && !trackDragState.isHoveringFolder && (
+              <>Arrastra a un álbum para agregarlo</>
+            )}
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   )

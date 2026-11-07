@@ -255,7 +255,11 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
 
         if (foundIndex !== -1) {
-          const foundTrack = resolvedAlbum.tracks[foundIndex]
+          const rawTrack = resolvedAlbum.tracks[foundIndex]
+          const foundTrack = {
+            ...rawTrack,
+            cover: rawTrack.cover || resolvedAlbum.cover || null
+          }
           const restoredTime =
             typeof saved.currentTime === 'number' &&
             !isNaN(saved.currentTime) &&
@@ -349,6 +353,151 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   const analyserRef = useRef(null)
   const sourceNodeRef = useRef(null)
   const eqFiltersRef = useRef([])
+  const compressorRef = useRef(null)
+  const crossfadeGainRef = useRef(null)
+
+  // Configuración general de la aplicación (guardada en localStorage y sincronizada con Electron)
+  const [appSettings, setAppSettings] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem('musicPlayerAppSettings')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        return {
+          replayGain: Boolean(parsed.replayGain),
+          crossfadeEnabled: Boolean(parsed.crossfadeEnabled),
+          crossfadeDuration: typeof parsed.crossfadeDuration === 'number' ? parsed.crossfadeDuration : 3,
+          discordRpc: Boolean(parsed.discordRpc),
+          gameOverlay: false, // Siempre inicia desactivado al arrancar la app para no aparecer sin ser activado
+          autoLyrics: parsed.autoLyrics !== undefined ? Boolean(parsed.autoLyrics) : true,
+          lyricsMode: parsed.lyricsMode === 'permanent' ? 'permanent' : 'temporary', // 'temporary' (en memoria) | 'permanent' (guardar .lrc)
+          alwaysOnTop: Boolean(parsed.alwaysOnTop)
+        }
+      }
+    } catch (_) {}
+    return {
+      replayGain: false,
+      crossfadeEnabled: false,
+      crossfadeDuration: 3,
+      discordRpc: false,
+      gameOverlay: false,
+      autoLyrics: true,
+      lyricsMode: 'temporary',
+      alwaysOnTop: false
+    }
+  })
+
+  const appSettingsRef = useRef(appSettings)
+  appSettingsRef.current = appSettings
+
+  // Estado reactivo de letras para informar en tiempo real a LyricsDock y Player
+  const [currentLyrics, setCurrentLyrics] = useState({
+    trackPath: null,
+    status: 'idle', // 'idle' | 'loading' | 'searching-online' | 'ready' | 'not-found'
+    synced: false,
+    lines: [],
+    source: null, // 'lrc' | 'id3-sylt' | 'id3-uslt' | 'metadata' | 'online-temp'
+    savedToDisk: false,
+    rawLyrics: null,
+    matchedTrack: null
+  })
+
+  const updateReplayGainNode = useCallback((enabled) => {
+    if (!compressorRef.current || !audioContextRef.current) return
+    const ctx = audioContextRef.current
+    const comp = compressorRef.current
+    const now = ctx.currentTime
+    try {
+      if (enabled) {
+        comp.threshold.setValueAtTime(-20, now)
+        comp.knee.setValueAtTime(30, now)
+        comp.ratio.setValueAtTime(8, now)
+        comp.attack.setValueAtTime(0.003, now)
+        comp.release.setValueAtTime(0.25, now)
+      } else {
+        comp.threshold.setValueAtTime(0, now)
+        comp.ratio.setValueAtTime(1, now)
+      }
+    } catch (_) {}
+  }, [])
+
+  const updateAppSettings = useCallback((patch) => {
+    setAppSettings((prev) => {
+      const partial = typeof patch === 'function' ? patch(prev) : patch
+      if (!partial || typeof partial !== 'object') return prev
+      const next = { ...prev, ...partial }
+      appSettingsRef.current = next
+      try {
+        window.localStorage.setItem('musicPlayerAppSettings', JSON.stringify(next))
+      } catch (_) {}
+
+      if (!isMiniPanel) {
+        if (Boolean(next.replayGain) !== Boolean(prev.replayGain)) {
+          updateReplayGainNode(Boolean(next.replayGain))
+        }
+        if (Boolean(next.discordRpc) !== Boolean(prev.discordRpc) && window.electronAPI?.setDiscordRpc) {
+          window.electronAPI.setDiscordRpc(Boolean(next.discordRpc))
+        }
+        if (Boolean(next.gameOverlay) !== Boolean(prev.gameOverlay) && window.electronAPI?.toggleGameOverlay) {
+          window.electronAPI.toggleGameOverlay(Boolean(next.gameOverlay))
+        }
+        if (Boolean(next.alwaysOnTop) !== Boolean(prev.alwaysOnTop) && window.electronAPI?.setMainAlwaysOnTop) {
+          window.electronAPI.setMainAlwaysOnTop(Boolean(next.alwaysOnTop))
+        }
+      }
+
+      return next
+    })
+  }, [isMiniPanel, updateReplayGainNode])
+
+  // Inicializar integraciones de Electron según settings guardados (solo en ventana principal)
+  useEffect(() => {
+    if (isMiniPanel) return
+    if (appSettingsRef.current.discordRpc && window.electronAPI?.setDiscordRpc) {
+      window.electronAPI.setDiscordRpc(true)
+    }
+    if (appSettingsRef.current.alwaysOnTop && window.electronAPI?.setMainAlwaysOnTop) {
+      window.electronAPI.setMainAlwaysOnTop(true)
+    }
+    // Asegurar que el HUD Overlay permanezca cerrado salvo que el usuario lo active explícitamente
+    if (window.electronAPI?.toggleGameOverlay) {
+      window.electronAPI.toggleGameOverlay(false)
+    }
+
+    let unsubOverlay = null
+    if (window.electronAPI?.onGameOverlayStatusChanged) {
+      unsubOverlay = window.electronAPI.onGameOverlayStatusChanged((active) => {
+        setAppSettings((prev) => {
+          if (Boolean(prev.gameOverlay) === Boolean(active)) return prev
+          const next = { ...prev, gameOverlay: Boolean(active) }
+          appSettingsRef.current = next
+          try {
+            window.localStorage.setItem('musicPlayerAppSettings', JSON.stringify(next))
+          } catch (_) {}
+          return next
+        })
+      })
+    }
+
+    let unsubTop = null
+    if (window.electronAPI?.onAlwaysOnTopStatusChanged) {
+      unsubTop = window.electronAPI.onAlwaysOnTopStatusChanged((isTop) => {
+        setAppSettings((prev) => {
+          if (Boolean(prev.alwaysOnTop) === Boolean(isTop)) return prev
+          const next = { ...prev, alwaysOnTop: Boolean(isTop) }
+          appSettingsRef.current = next
+          try {
+            window.localStorage.setItem('musicPlayerAppSettings', JSON.stringify(next))
+          } catch (_) {}
+          return next
+        })
+      })
+    }
+
+    return () => {
+      if (unsubOverlay) unsubOverlay()
+      if (unsubTop) unsubTop()
+    }
+  }, [isMiniPanel])
 
   // Estado persistente del ecualizador
   const [eqState, setEqState] = useState(() => {
@@ -414,19 +563,39 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         return filter
       })
 
-      // Conexión en cascada: source -> filter[0] -> ... -> filter[9] -> analyser -> ctx.destination
+      // Conexión en cascada: source -> filters -> compressor (ReplayGain) -> crossfadeGain -> analyser -> destination
       let prevNode = source
       for (const filter of filters) {
         prevNode.connect(filter)
         prevNode = filter
       }
-      prevNode.connect(analyser)
+
+      const compressor = ctx.createDynamicsCompressor()
+      const crossfadeGain = ctx.createGain()
+      crossfadeGain.gain.value = 1.0
+
+      if (appSettingsRef.current.replayGain) {
+        compressor.threshold.setValueAtTime(-20, ctx.currentTime)
+        compressor.knee.setValueAtTime(30, ctx.currentTime)
+        compressor.ratio.setValueAtTime(8, ctx.currentTime)
+        compressor.attack.setValueAtTime(0.003, ctx.currentTime)
+        compressor.release.setValueAtTime(0.25, ctx.currentTime)
+      } else {
+        compressor.threshold.setValueAtTime(0, ctx.currentTime)
+        compressor.ratio.setValueAtTime(1, ctx.currentTime)
+      }
+
+      prevNode.connect(compressor)
+      compressor.connect(crossfadeGain)
+      crossfadeGain.connect(analyser)
       analyser.connect(ctx.destination)
 
       audioContextRef.current = ctx
       analyserRef.current = analyser
       sourceNodeRef.current = source
       eqFiltersRef.current = filters
+      compressorRef.current = compressor
+      crossfadeGainRef.current = crossfadeGain
 
       if (ctx.state === 'suspended') {
         ctx.resume().catch(console.error)
@@ -493,6 +662,250 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     updateFilterGains(flatGains, true)
   }, [updateFilterGains])
 
+  // Gestión reactiva de letras (locales y búsqueda online temporal o permanente)
+  const activeLyricsReqRef = useRef(0)
+
+  const loadLyricsForTrack = useCallback(async (track, { forceOnline = false, bypassCache = false } = {}) => {
+    if (isMiniPanel || !track?.path) {
+      setCurrentLyrics({
+        trackPath: null,
+        status: 'idle',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+      return
+    }
+
+    const reqId = ++activeLyricsReqRef.current
+    const targetPath = track.path
+
+    // 1. Buscar primero letra local (.lrc / ID3) salvo que se fuerce búsqueda en línea
+    if (!forceOnline && window.electronAPI?.getTrackLyrics) {
+      setCurrentLyrics({
+        trackPath: targetPath,
+        status: 'loading',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+
+      try {
+        const localRes = await window.electronAPI.getTrackLyrics(targetPath)
+        if (reqId !== activeLyricsReqRef.current) return
+
+        if (localRes && Array.isArray(localRes.lines) && localRes.lines.length > 0) {
+          setCurrentLyrics({
+            trackPath: targetPath,
+            status: 'ready',
+            synced: Boolean(localRes.synced),
+            lines: localRes.lines,
+            source: localRes.source || 'lrc',
+            savedToDisk: true,
+            rawLyrics: null,
+            matchedTrack: null
+          })
+          setCurrentTrack((prev) => {
+            if (!prev || prev.path !== targetPath) return prev
+            if (prev.hasLyrics && prev.syncedLyrics === Boolean(localRes.synced)) return prev
+            return { ...prev, hasLyrics: true, syncedLyrics: Boolean(localRes.synced) }
+          })
+          return
+        }
+      } catch (_) {
+        if (reqId !== activeLyricsReqRef.current) return
+      }
+    }
+
+    // 2. Si no hay letra local, verificar si la búsqueda automática en línea está activa (o si fue solicitada manualmente)
+    const shouldSearchOnline = forceOnline || Boolean(appSettingsRef.current.autoLyrics)
+    if (!shouldSearchOnline || !window.electronAPI?.fetchTrackLyricsOnline) {
+      setCurrentLyrics({
+        trackPath: targetPath,
+        status: 'not-found',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+      return
+    }
+
+    // Informar inmediatamente al panel de letras que se está buscando en la base de datos en línea
+    setCurrentLyrics({
+      trackPath: targetPath,
+      status: 'searching-online',
+      synced: false,
+      lines: [],
+      source: null,
+      savedToDisk: false,
+      rawLyrics: null,
+      matchedTrack: null
+    })
+
+    try {
+      const saveToDisk = appSettingsRef.current.lyricsMode === 'permanent'
+      const onlineRes = await window.electronAPI.fetchTrackLyricsOnline({
+        trackPath: targetPath,
+        title: track.title,
+        artist: track.artist,
+        duration: track.duration,
+        saveToDisk,
+        bypassCache
+      })
+
+      if (reqId !== activeLyricsReqRef.current) return
+
+      if (onlineRes?.lyricsFound && onlineRes?.parsed?.lines?.length > 0) {
+        const isSynced = Boolean(onlineRes.parsed.synced)
+        const isSaved = Boolean(onlineRes.savedToDisk)
+        setCurrentLyrics({
+          trackPath: targetPath,
+          status: 'ready',
+          synced: isSynced,
+          lines: onlineRes.parsed.lines,
+          source: isSaved ? 'lrc' : 'online-temp',
+          savedToDisk: isSaved,
+          rawLyrics: onlineRes.lyrics || null,
+          matchedTrack: onlineRes.matchedTrack || null
+        })
+        setCurrentTrack((prev) => {
+          if (!prev || prev.path !== targetPath) return prev
+          return { ...prev, hasLyrics: true, syncedLyrics: isSynced }
+        })
+      } else {
+        setCurrentLyrics({
+          trackPath: targetPath,
+          status: 'not-found',
+          synced: false,
+          lines: [],
+          source: null,
+          savedToDisk: false,
+          rawLyrics: null,
+          matchedTrack: null
+        })
+      }
+    } catch (_) {
+      if (reqId !== activeLyricsReqRef.current) return
+      setCurrentLyrics({
+        trackPath: targetPath,
+        status: 'not-found',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+    }
+  }, [isMiniPanel])
+
+  // Disparar carga de letras cada vez que cambia la pista activa o se activa autoLyrics
+  useEffect(() => {
+    if (isMiniPanel) return
+    if (!currentTrack?.path) {
+      setCurrentLyrics({
+        trackPath: null,
+        status: 'idle',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+      return
+    }
+    loadLyricsForTrack(currentTrack)
+  }, [isMiniPanel, currentTrack?.path, appSettings.autoLyrics, loadLyricsForTrack])
+
+  // Guardar manualmente en archivo .lrc una letra que estaba en modo temporal
+  const saveCurrentLyricsToDisk = useCallback(async () => {
+    if (!currentTrack?.path || !currentLyrics?.rawLyrics || !window.electronAPI?.saveTrackLrc) {
+      return { success: false }
+    }
+    const res = await window.electronAPI.saveTrackLrc({
+      trackPath: currentTrack.path,
+      lyricsText: currentLyrics.rawLyrics
+    })
+    if (res?.success) {
+      const isSynced = Boolean(currentLyrics?.synced)
+      setCurrentLyrics((prev) => ({
+        ...prev,
+        source: 'lrc',
+        savedToDisk: true
+      }))
+      setCurrentTrack((prev) => (prev ? { ...prev, hasLyrics: true, syncedLyrics: isSynced } : prev))
+      setRawLibrary((prevLib) => {
+        if (!Array.isArray(prevLib)) return prevLib
+        return prevLib.map((album) => ({
+          ...album,
+          tracks: (album.tracks || []).map((t) =>
+            t.path === currentTrack.path ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
+          )
+        }))
+      })
+      setPlaylist((prevList) => {
+        if (!Array.isArray(prevList)) return prevList
+        return prevList.map((t) =>
+          t.path === currentTrack.path ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
+        )
+      })
+    }
+    return res
+  }, [currentTrack?.path, currentLyrics?.rawLyrics, currentLyrics?.synced])
+
+  // Eliminar archivo .lrc local si la letra descargada previamente no corresponde a la versión de la canción
+  const deleteCurrentLyricsFromDisk = useCallback(async () => {
+    if (!currentTrack?.path || !window.electronAPI?.deleteTrackLrc) {
+      return { success: false }
+    }
+    const res = await window.electronAPI.deleteTrackLrc({ trackPath: currentTrack.path })
+    if (res?.success) {
+      setCurrentLyrics({
+        trackPath: currentTrack.path,
+        status: 'not-found',
+        synced: false,
+        lines: [],
+        source: null,
+        savedToDisk: false,
+        rawLyrics: null,
+        matchedTrack: null
+      })
+      setCurrentTrack((prev) => (prev ? { ...prev, hasLyrics: false, syncedLyrics: false } : prev))
+      setRawLibrary((prevLib) => {
+        if (!Array.isArray(prevLib)) return prevLib
+        return prevLib.map((album) => ({
+          ...album,
+          tracks: (album.tracks || []).map((t) =>
+            t.path === currentTrack.path ? { ...t, hasLyrics: false, syncedLyrics: false } : t
+          )
+        }))
+      })
+      setPlaylist((prevList) => {
+        if (!Array.isArray(prevList)) return prevList
+        return prevList.map((t) =>
+          t.path === currentTrack.path ? { ...t, hasLyrics: false, syncedLyrics: false } : t
+        )
+      })
+    }
+    return res
+  }, [currentTrack?.path])
+
+  // Reintentar búsqueda de letra en línea
+  const retryOnlineLyrics = useCallback(() => {
+    if (!currentTrack?.path) return
+    loadLyricsForTrack(currentTrack, { forceOnline: true, bypassCache: true })
+  }, [currentTrack, loadLyricsForTrack])
+
   // Barajado uniforme Fisher-Yates de índices candidatos
   const buildShuffledIndices = useCallback((list, excludeIds = new Set(), avoidRecentIds = new Set()) => {
     const indices = []
@@ -529,6 +942,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
   // Carga un archivo de audio en el elemento Audio y actualiza estados de reproducción
   const loadAndPlayTrack = useCallback((track, album = null, index = -1) => {
+    if (isMiniPanel || !track) return
     const audio = audioRef.current
     pendingRestoreSeekRef.current = null
 
@@ -542,7 +956,29 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       playedInCycleRef.current.add(track.id)
     }
 
-    setCurrentTrack(track)
+    // Fundido de entrada suave (Crossfade) al iniciar la nueva pista si está activado
+    if (appSettingsRef.current.crossfadeEnabled && crossfadeGainRef.current && audioContextRef.current) {
+      try {
+        const ctx = audioContextRef.current
+        const gain = crossfadeGainRef.current
+        const now = ctx.currentTime
+        const fadeInDuration = Math.min(2.5, Math.max(0.6, (appSettingsRef.current.crossfadeDuration || 3) * 0.55))
+        gain.gain.cancelScheduledValues(now)
+        gain.gain.setValueAtTime(0.08, now)
+        gain.gain.linearRampToValueAtTime(1.0, now + fadeInDuration)
+      } catch (_) {}
+    } else if (crossfadeGainRef.current && audioContextRef.current) {
+      try {
+        const now = audioContextRef.current.currentTime
+        crossfadeGainRef.current.gain.cancelScheduledValues(now)
+        crossfadeGainRef.current.gain.setValueAtTime(1.0, now)
+      } catch (_) {}
+    }
+
+    const resolvedCover = track.cover || album?.cover || null
+    const trackWithCover = resolvedCover && !track.cover ? { ...track, cover: resolvedCover } : track
+
+    setCurrentTrack(trackWithCover)
     if (album) setCurrentAlbum(album)
     if (index >= 0) setPlaylistIndex(index)
 
@@ -553,7 +989,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     lastTimeSyncRef.current = performance.now()
     window.electronAPI.sendPlayerTime?.(0)
 
-    audio.src = resolveAudioSrc(track)
+    audio.src = resolveAudioSrc(trackWithCover)
 
     const playPromise = audio.play()
     if (playPromise !== undefined) {
@@ -570,10 +1006,16 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
           }
         })
     }
-  }, [initAudioAnalyser])
+  }, [isMiniPanel, initAudioAnalyser])
 
   // Reproducir pista específica (selección manual)
   const playTrack = useCallback((track, album = null, newPlaylist = null, index = 0) => {
+    if (isMiniPanel) {
+      if (typeof index === 'number' && index >= 0) {
+        window.electronAPI?.sendPlayerCommand?.('select-' + index)
+      }
+      return
+    }
     if (newPlaylist) {
       setPlaylist(newPlaylist)
       if (shufflePlaylistRef.current !== newPlaylist) {
@@ -594,11 +1036,15 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       futureRef.current = [] // Limpiar futuro al hacer una selección manual
     }
 
-    loadAndPlayTrack(track, album, index)
-  }, [currentTrack, currentAlbum, playlistIndex, loadAndPlayTrack, buildShuffledIndices])
+    loadAndPlayTrack(track, album || currentAlbum, index)
+  }, [isMiniPanel, currentTrack, currentAlbum, playlistIndex, loadAndPlayTrack, buildShuffledIndices])
 
   // Alternar reproducir/pausar (inicia la cola activa si aún no hay pista seleccionada)
   const togglePlay = useCallback(() => {
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('toggle-play')
+      return
+    }
     const audio = audioRef.current
     if (!currentTrack) {
       const candidateList = playlist.length > 0 ? playlist : (selectedAlbum?.tracks || [])
@@ -623,7 +1069,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.pause()
       setIsPlaying(false)
     }
-  }, [currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser])
+  }, [isMiniPanel, currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser])
 
   const persistSession = useCallback((overrideTime) => {
     if (isMiniPanel || !sessionRestoredRef.current) return
@@ -649,6 +1095,12 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
   // Navegar a posición de tiempo (scrubbing)
   const seekTo = useCallback((time) => {
+    if (isMiniPanel) {
+      if (!isNaN(time)) {
+        window.electronAPI?.sendPlayerCommand?.('seek-' + time)
+      }
+      return
+    }
     if (audioRef.current && !isNaN(time)) {
       pendingRestoreSeekRef.current = null
       audioRef.current.currentTime = time
@@ -657,30 +1109,40 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       window.electronAPI.sendPlayerTime?.(time)
       persistSession(time)
     }
-  }, [persistSession])
+  }, [isMiniPanel, persistSession])
 
   // Control de volumen
   const setVolumeLevel = useCallback((v) => {
     const clamped = Math.max(0, Math.min(1, v))
     setVolume(clamped)
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('volume-' + clamped)
+      return
+    }
     if (audioRef.current) {
       audioRef.current.volume = clamped
     }
-  }, [])
+  }, [isMiniPanel])
 
   // Ajuste relativo de volumen
   const adjustVolume = useCallback((delta) => {
     setVolume((prev) => {
       const next = Math.max(0, Math.min(1, Math.round(((prev ?? 0.8) + delta) * 100) / 100))
-      if (audioRef.current) {
+      if (isMiniPanel) {
+        window.electronAPI?.sendPlayerCommand?.('volume-' + next)
+      } else if (audioRef.current) {
         audioRef.current.volume = next
       }
       return next
     })
-  }, [])
+  }, [isMiniPanel])
 
   // Alternar modo aleatorio (reinicia la bolsa barajada con las canciones aún no reproducidas)
   const toggleShuffle = useCallback(() => {
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('toggle-shuffle')
+      return
+    }
     setShuffle(prev => {
       const next = !prev
       if (next && playlist.length > 0) {
@@ -691,19 +1153,27 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
       return next
     })
-  }, [playlist, currentTrack, playlistIndex, buildShuffledIndices])
+  }, [isMiniPanel, playlist, currentTrack, playlistIndex, buildShuffledIndices])
 
   // Alternar bucle (none -> all -> one -> none)
   const toggleLoop = useCallback(() => {
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('toggle-loop')
+      return
+    }
     setLoop(prev => {
       if (prev === 'none') return 'all'
       if (prev === 'all') return 'one'
       return 'none'
     })
-  }, [])
+  }, [isMiniPanel])
 
   // Siguiente canción
   const nextTrack = useCallback(() => {
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('next')
+      return
+    }
     if (playlist.length === 0) return
 
     // Si habíamos retrocedido previamente, avanzar por las canciones que estaban en el futuro
@@ -787,10 +1257,14 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
 
     loadAndPlayTrack(playlist[nextIndex], currentAlbum, nextIndex)
-  }, [playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack, buildShuffledIndices])
+  }, [isMiniPanel, playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack, buildShuffledIndices])
 
   // Canción anterior: regresa fielmente por todas las canciones escuchadas previamente
   const previousTrack = useCallback(() => {
+    if (isMiniPanel) {
+      window.electronAPI?.sendPlayerCommand?.('previous')
+      return
+    }
     if (playlist.length === 0) return
 
     // 1. Si hay canciones en el historial de reproducción, volver a la última escuchada
@@ -828,7 +1302,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
 
     loadAndPlayTrack(playlist[prevIndex], currentAlbum, prevIndex)
-  }, [playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack])
+  }, [isMiniPanel, playlist, playlistIndex, shuffle, loop, currentTrack, currentAlbum, loadAndPlayTrack])
 
   // Manejador de fin de pista
   const handleTrackEnd = useCallback(() => {
@@ -863,8 +1337,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [isMiniPanel, loadLibrary])
 
-  // Configurar listeners de eventos del objeto Audio
+  // Configurar listeners de eventos del objeto Audio (exclusivo para la ventana principal)
   useEffect(() => {
+    if (isMiniPanel) return
     const audio = audioRef.current
     audio.volume = volume
 
@@ -965,8 +1440,15 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         lastSentPlaylistRef.current = playlist
       }
 
+      const enrichedTrack = currentTrack
+        ? {
+            ...currentTrack,
+            cover: currentTrack.cover || currentAlbum?.cover || null
+          }
+        : null
+
       window.electronAPI.sendPlayerState({
-        currentTrack,
+        currentTrack: enrichedTrack,
         currentAlbum,
         ...(playlistChanged ? { playlist } : {}),
         playlistIndex,
@@ -1116,13 +1598,16 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [isMiniPanel])
 
-  // Escuchar comandos de hotkeys o de la ventana lateral
+  // Escuchar comandos de hotkeys o de la ventana lateral / Game Overlay
   useEffect(() => {
     if (isMiniPanel || !window.electronAPI.onPlayerCommand) return
 
     const unsubCommand = window.electronAPI.onPlayerCommand((command) => {
-      if (typeof command === 'string' && command.startsWith('select-')) {
-        const idx = parseInt(command.replace('select-', ''), 10)
+      const cmd = typeof command === 'string' ? command : command?.type
+      if (!cmd) return
+
+      if (typeof cmd === 'string' && cmd.startsWith('select-')) {
+        const idx = parseInt(cmd.replace('select-', ''), 10)
         if (!isNaN(idx) && playlist[idx]) {
           setPlaylistIndex(idx)
           playTrack(playlist[idx], currentAlbum, playlist, idx)
@@ -1130,39 +1615,45 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         return
       }
 
-      if (typeof command === 'string' && command.startsWith('seek-')) {
-        const time = parseFloat(command.replace('seek-', ''))
+      if (typeof cmd === 'string' && cmd.startsWith('seek-')) {
+        const time = parseFloat(cmd.replace('seek-', ''))
         if (!isNaN(time)) {
           seekTo(time)
         }
         return
       }
 
-      if (typeof command === 'string' && command.startsWith('volume-')) {
-        const v = parseFloat(command.replace('volume-', ''))
+      if (typeof cmd === 'string' && cmd.startsWith('volume-')) {
+        const v = parseFloat(cmd.replace('volume-', ''))
         if (!isNaN(v)) {
           setVolumeLevel(v)
         }
         return
       }
 
-      switch (command) {
+      if (cmd === 'adjust-volume') {
+        const delta = typeof command?.delta === 'number' ? command.delta : 0.05
+        adjustVolume(delta)
+        return
+      }
+
+      switch (cmd) {
         case 'next': nextTrack(); break
         case 'previous': previousTrack(); break
         case 'toggle-play': togglePlay(); break
         case 'toggle-shuffle': toggleShuffle(); break
         case 'toggle-loop': toggleLoop(); break
         case 'volume-up':
-          setVolumeLevel(Math.min(1, Math.round(((volume ?? 0.8) + 0.05) * 100) / 100))
+          adjustVolume(0.05)
           break
         case 'volume-down':
-          setVolumeLevel(Math.max(0, Math.round(((volume ?? 0.8) - 0.05) * 100) / 100))
+          adjustVolume(-0.05)
           break
         default: break
       }
     })
     return unsubCommand
-  }, [isMiniPanel, playlist, currentAlbum, playTrack, seekTo, setVolumeLevel, nextTrack, previousTrack, togglePlay, toggleShuffle, toggleLoop, volume])
+  }, [isMiniPanel, playlist, currentAlbum, playTrack, seekTo, setVolumeLevel, adjustVolume, nextTrack, previousTrack, togglePlay, toggleShuffle, toggleLoop, volume])
 
   // Obtener información completa de en cuántos y cuáles álbumes está una canción
   const getTrackAlbumInfo = useCallback((track) => {
@@ -1794,7 +2285,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     toggleEqEnabled,
     resetEq,
     EQ_FREQUENCIES,
-    EQ_PRESETS
+    EQ_PRESETS,
+    appSettings,
+    updateAppSettings,
+    currentLyrics,
+    saveCurrentLyricsToDisk,
+    deleteCurrentLyricsFromDisk,
+    retryOnlineLyrics
   }), [
     currentTrack,
     currentAlbum,
@@ -1820,7 +2317,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     setEqBandGain,
     applyEqPreset,
     toggleEqEnabled,
-    resetEq
+    resetEq,
+    appSettings,
+    updateAppSettings,
+    currentLyrics,
+    saveCurrentLyricsToDisk,
+    deleteCurrentLyricsFromDisk,
+    retryOnlineLyrics
   ])
 
   // Contexto combinado para compatibilidad total con usePlayer()
