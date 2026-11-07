@@ -4,6 +4,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Reproductor de Música</title>
+  <script>
+    (function () {
+      try {
+        var root = document.documentElement;
+        var savedTheme = window.localStorage.getItem('musicPlayerTheme');
+        root.dataset.theme = savedTheme === 'light' ? 'light' : 'dark';
+        var hash = window.location.hash;
+        if (hash === '#/mini' || hash === '#/notification' || hash === '#/overlay') {
+          root.dataset.windowMode = hash.slice(2);
+          root.style.background = 'transparent';
+        } else {
+          root.dataset.windowMode = 'main';
+        }
+      } catch (_) {}
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>

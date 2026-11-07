@@ -163,7 +163,7 @@ const TreeNode = React.memo(function TreeNode({
       title={isAllTracks ? 'Colección completa de todas las canciones' : `${node.name} (${node.trackCount} pistas)`}
     >
       {node.cover ? (
-        <>
+        <React.Fragment key={node.cover}>
           <img
             src={node.cover}
             alt={node.name}
@@ -178,7 +178,7 @@ const TreeNode = React.memo(function TreeNode({
             }}
           />
           <div className="album-item-cover-placeholder" style={{ display: 'none' }}>{isAllTracks ? '✨' : '💿'}</div>
-        </>
+        </React.Fragment>
       ) : (
         <div className="album-item-cover-placeholder">{isAllTracks ? '✨' : '💿'}</div>
       )}

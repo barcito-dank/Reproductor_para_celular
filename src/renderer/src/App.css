@@ -61,6 +61,15 @@ body {
   user-select: none;
 }
 
+:root[data-window-mode='mini'],
+:root[data-window-mode='mini'] body,
+:root[data-window-mode='notification'],
+:root[data-window-mode='notification'] body,
+:root[data-window-mode='overlay'],
+:root[data-window-mode='overlay'] body {
+  background: transparent !important;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
 }

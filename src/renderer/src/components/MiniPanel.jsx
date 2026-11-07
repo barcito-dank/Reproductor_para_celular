@@ -1,4 +1,4 @@
-import { usePlayer, usePlayerTime } from '../context/PlayerContext'
+import { usePlayback, usePlayerTime } from '../context/PlayerContext'
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 
 const MINI_ROW_HEIGHT = 52
@@ -119,7 +119,7 @@ const MiniTrackRow = React.memo(function MiniTrackRow({
       onClick={() => onSelect(index)}
     >
       {track.cover ? (
-        <>
+        <React.Fragment key={track.cover}>
           <img
             src={track.cover}
             alt=""
@@ -133,7 +133,7 @@ const MiniTrackRow = React.memo(function MiniTrackRow({
             }}
           />
           <div className="mini-track-cover-placeholder" style={{ display: 'none' }}>🎵</div>
-        </>
+        </React.Fragment>
       ) : (
         <div className="mini-track-cover-placeholder">🎵</div>
       )}
@@ -174,7 +174,7 @@ function MiniPanel() {
     shuffle,
     loop,
     volume
-  } = usePlayer()
+  } = usePlayback()
 
   // 'hidden' | 'marker' | 'expanded'
   const [mode, setMode] = useState('hidden')
@@ -477,7 +477,7 @@ function MiniPanel() {
         <div className="mini-now-playing">
           <div className={`mini-now-cover-wrap ${isPlaying && isExpanded ? 'playing' : ''}`}>
             {currentTrack?.cover ? (
-              <>
+              <React.Fragment key={currentTrack.cover}>
                 <img
                   src={currentTrack.cover}
                   alt=""
@@ -490,7 +490,7 @@ function MiniPanel() {
                   }}
                 />
                 <div className="mini-now-cover-placeholder" style={{ display: 'none' }}>💿</div>
-              </>
+              </React.Fragment>
             ) : (
               <div className="mini-now-cover-placeholder">💿</div>
             )}

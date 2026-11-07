@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { usePlayer, usePlayerTime } from '../context/PlayerContext'
+import { usePlayback, usePlayerTime } from '../context/PlayerContext'
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -9,7 +9,7 @@ function formatTime(seconds) {
 }
 
 export default function GameOverlay() {
-  const { currentTrack, currentAlbum, isPlaying, duration } = usePlayer()
+  const { currentTrack, currentAlbum, isPlaying, duration } = usePlayback()
   const { currentTime } = usePlayerTime()
   const [isHovered, setIsHovered] = useState(false)
   const [coverError, setCoverError] = useState(false)

@@ -222,10 +222,34 @@ function setupMusicDirectoryWatcher(dir) {
   }
 }
 
+let isMainWindowReadyToShow = false
+let isRendererHydrated = false
+let mainWindowRevealTimer = null
+
+function revealMainWindowIfReady(force = false) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isVisible()) return
+  if (!isMainWindowReadyToShow && !force) return
+  if (!isRendererHydrated && !force) return
+
+  if (mainWindowRevealTimer) {
+    clearTimeout(mainWindowRevealTimer)
+    mainWindowRevealTimer = null
+  }
+  mainWindow.show()
+}
+
 function createMainWindow() {
   const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize
   const initialWidth = Math.max(960, Math.min(1200, Math.round(workWidth * 0.84)))
   const initialHeight = Math.max(680, Math.min(880, Math.round(workHeight * 0.9)))
+
+  isMainWindowReadyToShow = false
+  isRendererHydrated = false
+  if (mainWindowRevealTimer) {
+    clearTimeout(mainWindowRevealTimer)
+    mainWindowRevealTimer = null
+  }
 
   mainWindow = new BrowserWindow({
     width: initialWidth,
@@ -235,7 +259,7 @@ function createMainWindow() {
     frame: false,
     backgroundColor: '#0f0f13',
     titleBarStyle: 'hidden',
-    show: false, // Ocultar hasta el primer pintado listo para evitar parpadeos y marco oscuro vacío
+    show: false, // Ocultar hasta que el árbol inicial esté hidratado para evitar parpadeos y saltos de layout
     icon: getAppIconPath(),
     webPreferences: {
       preload: getPreloadPath(),
@@ -245,10 +269,15 @@ function createMainWindow() {
     }
   })
 
-  // Mostrar la ventana suavemente únicamente cuando el DOM y el CSS inicial estén completamente listos
+  // Coordinar ready-to-show con la hidratación inicial de React (o fallback de 220ms en escaneos en frío)
   mainWindow.once('ready-to-show', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
+    isMainWindowReadyToShow = true
+    if (isRendererHydrated) {
+      revealMainWindowIfReady(true)
+    } else {
+      mainWindowRevealTimer = setTimeout(() => {
+        revealMainWindowIfReady(true)
+      }, 220)
     }
   })
 
@@ -1793,6 +1822,11 @@ ipcMain.on('window-minimize', () => {
       }
     }, 180)
   }, 16)
+})
+
+ipcMain.on('renderer-ready', () => {
+  isRendererHydrated = true
+  revealMainWindowIfReady()
 })
 
 ipcMain.on('window-maximize', () => {

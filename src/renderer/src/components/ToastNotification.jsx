@@ -36,7 +36,7 @@ function ToastNotification() {
   return (
     <div className={`toast-balloon-wrapper ${animState === 'exiting' ? 'fade-out' : 'descend'}`}>
       <div className="toast-balloon-card">
-        <div className="toast-balloon-cover">
+        <div className="toast-balloon-cover" key={track.cover || 'no-cover'}>
           {track.cover ? (
             <>
               <img

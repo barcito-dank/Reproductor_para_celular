@@ -1,14 +1,46 @@
-import { useState, useEffect, useRef } from 'react'
-import { PlayerProvider, usePlayer } from './context/PlayerContext'
-import Sidebar from './components/Sidebar'
-import AlbumView from './components/AlbumView'
-import Player from './components/Player'
-import MiniPanel from './components/MiniPanel'
-import SpotlightSearch from './components/SpotlightSearch'
-import ToastNotification from './components/ToastNotification'
-import SettingsModal from './components/SettingsModal'
-import ExtractorModal from './components/ExtractorModal'
-import GameOverlay from './components/GameOverlay'
+import React, { useState, useEffect, useCallback, Suspense, lazy, memo } from 'react'
+import { PlayerProvider, useLibrary, usePlayback } from './context/PlayerContext'
+
+const initialHash = window.location.hash
+const isSecondaryWindow =
+  initialHash === '#/mini' ||
+  initialHash === '#/notification' ||
+  initialHash === '#/overlay'
+
+// En la ventana principal, iniciar precarga paralela inmediata en t=0ms (cero cascada de carga).
+// En ventanas secundarias (MiniPanel, Toast, Overlay), jamás se descargan ni compilan en V8.
+const sidebarPromise = !isSecondaryWindow ? import('./components/Sidebar') : null
+const albumViewPromise = !isSecondaryWindow ? import('./components/AlbumView') : null
+const playerPromise = !isSecondaryWindow ? import('./components/Player') : null
+
+const Sidebar = lazy(() => sidebarPromise || import('./components/Sidebar'))
+const AlbumView = lazy(() => albumViewPromise || import('./components/AlbumView'))
+const Player = lazy(() => playerPromise || import('./components/Player'))
+const MiniPanel = lazy(() => import('./components/MiniPanel'))
+const ToastNotification = lazy(() => import('./components/ToastNotification'))
+const GameOverlay = lazy(() => import('./components/GameOverlay'))
+const SpotlightSearch = lazy(() => import('./components/SpotlightSearch'))
+const SettingsModal = lazy(() => import('./components/SettingsModal'))
+const ExtractorModal = lazy(() => import('./components/ExtractorModal'))
+
+/**
+ * Subcomponente aislado para el resplandor ambiental de fondo.
+ * Evita que MainPlayerApp re-renderice toda la estructura al cambiar de canción o de álbum.
+ */
+const AmbientBackdrop = memo(function AmbientBackdrop() {
+  const { selectedAlbum } = useLibrary()
+  const { currentTrack } = usePlayback()
+  const hasCover = Boolean(currentTrack?.cover || selectedAlbum?.cover)
+
+  return (
+    <div
+      className="ambient-backdrop-glow"
+      style={{
+        opacity: hasCover ? 0.85 : 0.4
+      }}
+    />
+  )
+})
 
 function MainPlayerApp({ theme, onThemeChange }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
@@ -16,7 +48,24 @@ function MainPlayerApp({ theme, onThemeChange }) {
   const [isSpotlightOpen, setIsSpotlightOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isExtractorOpen, setIsExtractorOpen] = useState(false)
-  const { currentTrack, selectedAlbum, togglePlay, adjustVolume, updateMusicDirectory } = usePlayer()
+  const { updateMusicDirectory } = useLibrary()
+  const { togglePlay, adjustVolume } = usePlayback()
+
+  const handleToggleSidebar = useCallback(() => {
+    setIsSidebarOpen((prev) => !prev)
+  }, [])
+
+  const handleCloseSpotlight = useCallback(() => {
+    setIsSpotlightOpen(false)
+  }, [])
+
+  const handleCloseSettings = useCallback(() => {
+    setIsSettingsOpen(false)
+  }, [])
+
+  const handleCloseExtractor = useCallback(() => {
+    setIsExtractorOpen(false)
+  }, [])
 
   // Sincronizar visibilidad del Panel Lateral
   useEffect(() => {
@@ -31,7 +80,7 @@ function MainPlayerApp({ theme, onThemeChange }) {
     }
   }, [])
 
-  const handleBrowseMusicDirectory = async () => {
+  const handleBrowseMusicDirectory = useCallback(async () => {
     try {
       const directory = await window.electronAPI?.selectMusicDirectory?.()
       if (directory) {
@@ -40,7 +89,7 @@ function MainPlayerApp({ theme, onThemeChange }) {
     } catch (err) {
       console.error('Error seleccionando el directorio de música:', err)
     }
-  }
+  }, [updateMusicDirectory])
 
   // Atajos de teclado en la ventana principal
   useEffect(() => {
@@ -48,14 +97,14 @@ function MainPlayerApp({ theme, onThemeChange }) {
       // Atajo global para Buscador Spotlight (Ctrl+K o Ctrl+F)
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
-        setIsSpotlightOpen(prev => !prev)
+        setIsSpotlightOpen((prev) => !prev)
         return
       }
 
       // Atajo Ctrl+D para Descargar / Pegar Enlace (Extractor)
       if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
         e.preventDefault()
-        setIsExtractorOpen(prev => !prev)
+        setIsExtractorOpen((prev) => !prev)
         return
       }
 
@@ -167,44 +216,47 @@ function MainPlayerApp({ theme, onThemeChange }) {
       </header>
 
       {/* Contenido principal con Fondo Ambiental Dinámico fijo (no repinta al hacer scroll) */}
-      <div className="app-content">
-        <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen(prev => !prev)} />
-        <div className="main-stage">
-          <div
-            className="ambient-backdrop-glow"
-            style={{
-              opacity: (currentTrack?.cover || selectedAlbum?.cover) ? 0.85 : 0.4
-            }}
-          />
-          <main className="main-view">
-            <AlbumView />
-          </main>
+      <Suspense fallback={null}>
+        <div className="app-content">
+          <Sidebar isOpen={isSidebarOpen} onToggle={handleToggleSidebar} />
+          <div className="main-stage">
+            <AmbientBackdrop />
+            <main className="main-view">
+              <AlbumView />
+            </main>
+          </div>
         </div>
-      </div>
 
-      {/* Barra del reproductor */}
-      <Player />
+        {/* Barra del reproductor */}
+        <Player />
+      </Suspense>
 
-      {/* Buscador Global Spotlight (Ctrl+K) */}
-      <SpotlightSearch
-        isOpen={isSpotlightOpen}
-        onClose={() => setIsSpotlightOpen(false)}
-      />
+      {/* Modales bajo demanda: solo se montan y suscriben a contexto cuando están abiertos */}
+      <Suspense fallback={null}>
+        {isSpotlightOpen && (
+          <SpotlightSearch
+            isOpen={isSpotlightOpen}
+            onClose={handleCloseSpotlight}
+          />
+        )}
 
-      {/* Modal de Ajustes y Configuración Avanzada */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        theme={theme}
-        onThemeChange={onThemeChange}
-        onBrowseDirectory={handleBrowseMusicDirectory}
-      />
+        {isSettingsOpen && (
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={handleCloseSettings}
+            theme={theme}
+            onThemeChange={onThemeChange}
+            onBrowseDirectory={handleBrowseMusicDirectory}
+          />
+        )}
 
-      {/* Modal para Invocar al Extractor de Música */}
-      <ExtractorModal
-        isOpen={isExtractorOpen}
-        onClose={() => setIsExtractorOpen(false)}
-      />
+        {isExtractorOpen && (
+          <ExtractorModal
+            isOpen={isExtractorOpen}
+            onClose={handleCloseExtractor}
+          />
+        )}
+      </Suspense>
     </div>
   )
 }
@@ -220,11 +272,11 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    if (!isMini && !isNotification) {
+    if (!isMini && !isNotification && !isOverlay) {
       window.localStorage.setItem('musicPlayerTheme', theme)
       window.electronAPI?.sendPlayerCommand?.(`theme-${theme}`)
     }
-  }, [theme, isMini, isNotification])
+  }, [theme, isMini, isNotification, isOverlay])
 
   // Sincronizar cambios de tema en tiempo real hacia la barra lateral (MiniPanel) y notificaciones
   useEffect(() => {
@@ -259,13 +311,19 @@ function App() {
   }, [isMini, isNotification, isOverlay])
 
   if (isNotification) {
-    return <ToastNotification />
+    return (
+      <Suspense fallback={null}>
+        <ToastNotification />
+      </Suspense>
+    )
   }
 
   if (isOverlay) {
     return (
       <PlayerProvider isMiniPanel={true}>
-        <GameOverlay />
+        <Suspense fallback={null}>
+          <GameOverlay />
+        </Suspense>
       </PlayerProvider>
     )
   }
@@ -273,7 +331,9 @@ function App() {
   if (isMini) {
     return (
       <PlayerProvider isMiniPanel={true}>
-        <MiniPanel />
+        <Suspense fallback={null}>
+          <MiniPanel />
+        </Suspense>
       </PlayerProvider>
     )
   }

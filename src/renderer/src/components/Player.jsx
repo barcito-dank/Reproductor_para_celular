@@ -1,4 +1,4 @@
-import { usePlayer, usePlayerTime, EQ_FREQUENCIES, EQ_PRESETS } from '../context/PlayerContext'
+import { usePlayback, usePlayerTime, EQ_FREQUENCIES, EQ_PRESETS } from '../context/PlayerContext'
 import React, { useState, useRef, useCallback, useEffect } from 'react'
 import AudioVisualizer from './AudioVisualizer'
 import LyricsDock from './LyricsDock'
@@ -326,7 +326,7 @@ function Player() {
     applyEqPreset,
     toggleEqEnabled,
     resetEq
-  } = usePlayer()
+  } = usePlayback()
 
   const [prevVolume, setPrevVolume] = useState(0.8)
   const [showVisualizer, setShowVisualizer] = useState(() => {
@@ -358,6 +358,10 @@ function Player() {
   const closeLyrics = useCallback(() => {
     setShowLyrics(false)
     localStorage.setItem('rep_show_lyrics', 'false')
+  }, [])
+
+  const closeEqModal = useCallback(() => {
+    setShowEqModal(false)
   }, [])
 
   const handleVolumeClick = useCallback((e) => {
@@ -396,7 +400,7 @@ function Player() {
         {/* 1. Track Info (Carátula grande, título, artista) */}
       <div className="player-track-info">
         {currentTrack?.cover ? (
-          <>
+          <React.Fragment key={currentTrack.cover}>
             <img
               src={currentTrack.cover}
               alt=""
@@ -409,7 +413,7 @@ function Player() {
               }}
             />
             <div className="player-cover-placeholder" style={{ display: 'none' }}>💿</div>
-          </>
+          </React.Fragment>
         ) : (
           <div className="player-cover-placeholder">💿</div>
         )}
@@ -545,25 +549,29 @@ function Player() {
       </div>
 
       {/* Modal del Ecualizador */}
-      <EqualizerModal
-        isOpen={showEqModal}
-        onClose={() => setShowEqModal(false)}
-        eqState={eqState}
-        setEqBandGain={setEqBandGain}
-        applyEqPreset={applyEqPreset}
-        toggleEqEnabled={toggleEqEnabled}
-        resetEq={resetEq}
-        EQ_FREQUENCIES={EQ_FREQUENCIES}
-        EQ_PRESETS={EQ_PRESETS}
-      />
+      {showEqModal && (
+        <EqualizerModal
+          isOpen={showEqModal}
+          onClose={closeEqModal}
+          eqState={eqState}
+          setEqBandGain={setEqBandGain}
+          applyEqPreset={applyEqPreset}
+          toggleEqEnabled={toggleEqEnabled}
+          resetEq={resetEq}
+          EQ_FREQUENCIES={EQ_FREQUENCIES}
+          EQ_PRESETS={EQ_PRESETS}
+        />
+      )}
 
-      {/* Dock Flotante de Letras (3 Líneas / Modo Expandido) */}
-      <LyricsDock
-        isOpen={showLyrics}
-        onClose={closeLyrics}
-        currentTrack={currentTrack}
-        seekTo={seekTo}
-      />
+      {/* Dock Flotante de Letras (3 Líneas / Modo Expandido): se monta solo cuando está visible para evitar suscribir currentTime en vano */}
+      {showLyrics && (
+        <LyricsDock
+          isOpen={showLyrics}
+          onClose={closeLyrics}
+          currentTrack={currentTrack}
+          seekTo={seekTo}
+        />
+      )}
     </div>
   </div>
   )

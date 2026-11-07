@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { usePlayer, usePlayerTime } from '../context/PlayerContext'
+import { usePlayback, usePlayerTime } from '../context/PlayerContext'
 
 function formatSeconds(sec) {
   if (sec === undefined || sec === null || isNaN(sec)) return ''
@@ -19,12 +19,32 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
     saveCurrentLyricsToDisk,
     deleteCurrentLyricsFromDisk,
     retryOnlineLyrics
-  } = usePlayer()
+  } = usePlayback()
   const { currentTime } = usePlayerTime()
   const [isExpanded, setIsExpanded] = useState(false)
   const [actionFeedback, setActionFeedback] = useState(null)
   const activeLineRef = useRef(null)
   const expandedListRef = useRef(null)
+
+  const status = currentLyrics?.status || 'idle'
+  const isLoadingLyrics = status === 'loading' || status === 'searching-online'
+  const lines = currentLyrics?.lines || []
+  const hasLines = lines.length > 0
+  const isSynced = Boolean(currentLyrics?.synced && hasLines)
+  const isTemporary = hasLines && !currentLyrics?.savedToDisk
+  const isSavedOnDisk = hasLines && Boolean(currentLyrics?.savedToDisk)
+
+  // Calcular índice de la línea activa en base al tiempo actual
+  let activeIndex = -1
+  if (isOpen && isSynced) {
+    for (let i = 0; i < lines.length; i++) {
+      if (currentTime >= lines[i].time) {
+        activeIndex = i
+      } else {
+        break
+      }
+    }
+  }
 
   useEffect(() => {
     setActionFeedback(null)
@@ -40,37 +60,17 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isOpen, onClose])
 
-  // Desplazamiento automático en modo expandido
+  // Desplazamiento automático en modo expandido únicamente cuando cambia la línea activa
   useEffect(() => {
-    if (isExpanded && activeLineRef.current && expandedListRef.current) {
+    if (isOpen && isExpanded && activeLineRef.current && expandedListRef.current) {
       activeLineRef.current.scrollIntoView({
         behavior: 'smooth',
         block: 'center'
       })
     }
-  }, [currentTime, isExpanded])
+  }, [activeIndex, isExpanded, isOpen])
 
   if (!isOpen) return null
-
-  const status = currentLyrics?.status || 'idle'
-  const isLoadingLyrics = status === 'loading' || status === 'searching-online'
-  const lines = currentLyrics?.lines || []
-  const hasLines = lines.length > 0
-  const isSynced = Boolean(currentLyrics?.synced && hasLines)
-  const isTemporary = hasLines && !currentLyrics?.savedToDisk
-  const isSavedOnDisk = hasLines && Boolean(currentLyrics?.savedToDisk)
-
-  // Calcular índice de la línea activa en base al tiempo actual
-  let activeIndex = -1
-  if (isSynced) {
-    for (let i = 0; i < lines.length; i++) {
-      if (currentTime >= lines[i].time) {
-        activeIndex = i
-      } else {
-        break
-      }
-    }
-  }
 
   const pastLine = activeIndex > 0 ? lines[activeIndex - 1] : null
   const currentLine =

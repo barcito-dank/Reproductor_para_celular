@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import { usePlayer } from '../context/PlayerContext'
+import React, { useEffect, useRef } from 'react'
+import { usePlayback } from '../context/PlayerContext'
 
 /**
  * Visualizador de Espectro de Audio Real basado en Web Audio API
@@ -7,7 +7,7 @@ import { usePlayer } from '../context/PlayerContext'
  * barras reactivas con gradiente neón y picos flotantes con gravedad.
  */
 function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
-  const { analyserRef, audioContextRef, isPlaying, currentTrack, initAudioAnalyser } = usePlayer()
+  const { analyserRef, audioContextRef, isPlaying, currentTrack, initAudioAnalyser } = usePlayback()
   const canvasRef = useRef(null)
   const animFrameRef = useRef(null)
   const isPlayingRef = useRef(isPlaying)
@@ -37,8 +37,9 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
   }
 
   useEffect(() => {
+    if (!isPlaying) return
     initAudioAnalyser()
-    if (isPlaying && audioContextRef?.current?.state === 'suspended') {
+    if (audioContextRef?.current?.state === 'suspended') {
       audioContextRef.current.resume().catch(() => {})
     }
   }, [initAudioAnalyser, isPlaying, currentTrack, audioContextRef])
@@ -375,4 +376,4 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
   )
 }
 
-export default AudioVisualizer
+export default React.memo(AudioVisualizer)

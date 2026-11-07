@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteAlbumFolder: (payload) => ipcRenderer.invoke('delete-album-folder', payload),
 
   // Controles de ventana
+  notifyRendererReady: () => ipcRenderer.send('renderer-ready'),
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
   maximizeWindow: () => ipcRenderer.send('window-maximize'),
   closeWindow: () => ipcRenderer.send('window-close'),

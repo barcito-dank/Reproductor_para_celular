@@ -122,7 +122,7 @@ const TrackRow = React.memo(function TrackRow({
       {/* Miniatura de la Imagen de la Canción con Hover Play */}
       <div className="track-cover-container">
         {track.cover ? (
-          <>
+          <React.Fragment key={track.cover}>
             <img
               src={track.cover}
               alt=""
@@ -136,7 +136,7 @@ const TrackRow = React.memo(function TrackRow({
               }}
             />
             <div className="track-thumb-fallback" style={{ display: 'none' }}>🎵</div>
-          </>
+          </React.Fragment>
         ) : (
           <div className="track-thumb-fallback">🎵</div>
         )}
@@ -1443,7 +1443,7 @@ function AlbumView() {
         <div className="album-cover-wrapper">
           <div className="album-cover-glow" style={{ backgroundImage: album.cover ? `url("${album.cover}")` : undefined }} />
           {album.cover ? (
-            <>
+            <React.Fragment key={album.cover}>
               <img
                 src={album.cover}
                 alt={album.name}
@@ -1456,7 +1456,7 @@ function AlbumView() {
                 }}
               />
               <div className="album-cover-large-placeholder" style={{ display: 'none' }}>💿</div>
-            </>
+            </React.Fragment>
           ) : (
             <div className="album-cover-large-placeholder">💿</div>
           )}
