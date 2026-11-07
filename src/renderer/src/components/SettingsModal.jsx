@@ -18,6 +18,126 @@ export default function SettingsModal({ isOpen, onClose, theme, onThemeChange, o
   const [isBatchDownloadingLyrics, setIsBatchDownloadingLyrics] = useState(false)
   const [batchLyricsResult, setBatchLyricsResult] = useState(null)
 
+  // Estados de Atajos de Teclado configurables
+  const [hotkeysMap, setHotkeysMap] = useState({})
+  const [editingAction, setEditingAction] = useState(null)
+  const [hotkeyFeedback, setHotkeyFeedback] = useState(null)
+
+  const refreshHotkeys = useCallback(() => {
+    if (window.electronAPI?.getHotkeysConfig) {
+      window.electronAPI.getHotkeysConfig().then((cfg) => {
+        if (cfg) setHotkeysMap(cfg)
+      }).catch(console.error)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isOpen && activeTab === 'shortcuts') {
+      refreshHotkeys()
+    }
+  }, [isOpen, activeTab, refreshHotkeys])
+
+  useEffect(() => {
+    if (!editingAction) return
+
+    const handleCaptureKey = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+
+      if (e.key === 'Escape') {
+        setEditingAction(null)
+        return
+      }
+
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) {
+        return
+      }
+
+      const parts = []
+      if (e.ctrlKey) parts.push('Ctrl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey) parts.push('Super')
+
+      let keyName = e.key
+      if (keyName === ' ') keyName = 'Space'
+      else if (keyName === 'ArrowUp') keyName = 'Up'
+      else if (keyName === 'ArrowDown') keyName = 'Down'
+      else if (keyName === 'ArrowLeft') keyName = 'Left'
+      else if (keyName === 'ArrowRight') keyName = 'Right'
+      else if (keyName.length === 1) keyName = keyName.toUpperCase()
+
+      const isSpecialSingle = /^F\d{1,2}$/i.test(keyName) || /^Media/i.test(keyName)
+      if (parts.length === 0 && !isSpecialSingle) {
+        setHotkeyFeedback({ error: 'Usa al menos un modificador (Ctrl, Alt o Shift) + tecla' })
+        setTimeout(() => setHotkeyFeedback(null), 2500)
+        return
+      }
+
+      parts.push(keyName)
+      const accelerator = parts.join('+')
+
+      window.electronAPI?.updateHotkey?.({ action: editingAction, accelerator })
+        .then((res) => {
+          if (res?.success) {
+            setHotkeysMap(res.hotkeys || {})
+            setHotkeyFeedback({ success: `Atajo actualizado: ${accelerator}` })
+            setTimeout(() => setHotkeyFeedback(null), 2500)
+          } else {
+            setHotkeyFeedback({ error: res?.error || 'No se pudo registrar el atajo' })
+            setTimeout(() => setHotkeyFeedback(null), 3000)
+          }
+        })
+        .catch((err) => {
+          setHotkeyFeedback({ error: err.message })
+          setTimeout(() => setHotkeyFeedback(null), 3000)
+        })
+        .finally(() => {
+          setEditingAction(null)
+        })
+    }
+
+    window.addEventListener('keydown', handleCaptureKey, true)
+    return () => window.removeEventListener('keydown', handleCaptureKey, true)
+  }, [editingAction])
+
+  const handleResetAllHotkeys = async () => {
+    if (!window.electronAPI?.resetHotkeys) return
+    const res = await window.electronAPI.resetHotkeys()
+    if (res?.success) {
+      setHotkeysMap(res.hotkeys || {})
+      setHotkeyFeedback({ success: 'Atajos restablecidos a los valores por defecto' })
+      setTimeout(() => setHotkeyFeedback(null), 2500)
+    }
+  }
+
+  const handleResetSingleHotkey = async (action, defaultShortcut) => {
+    if (!window.electronAPI?.updateHotkey || !defaultShortcut) return
+    const res = await window.electronAPI.updateHotkey({ action, accelerator: defaultShortcut })
+    if (res?.success) {
+      setHotkeysMap(res.hotkeys || {})
+      setHotkeyFeedback({ success: `Atajo restablecido: ${defaultShortcut}` })
+      setTimeout(() => setHotkeyFeedback(null), 2500)
+    }
+  }
+
+  const renderShortcutKeys = (accelerator) => {
+    if (!accelerator) return null
+    const parts = accelerator.split('+').map((p) => p.trim())
+    return (
+      <div className="settings-shortcut-keys">
+        {parts.map((p, idx) => (
+          <React.Fragment key={`${p}-${idx}`}>
+            {idx > 0 && <span>+</span>}
+            <kbd className="settings-kbd">
+              {p === 'Space' ? 'Espacio' : p === 'Up' ? '↑' : p === 'Down' ? '↓' : p === 'Left' ? '←' : p === 'Right' ? '→' : p}
+            </kbd>
+          </React.Fragment>
+        ))}
+      </div>
+    )
+  }
+
   // Comprobar estado de Discord y Overlay al abrir
   useEffect(() => {
     if (isOpen) {
@@ -135,7 +255,14 @@ export default function SettingsModal({ isOpen, onClose, theme, onThemeChange, o
         </div>
 
         {/* Pestañas de navegación */}
-        <div className="settings-tabs-bar">
+        <div
+          className="settings-tabs-bar"
+          onWheel={(e) => {
+            if (e.deltaY !== 0) {
+              e.currentTarget.scrollLeft += e.deltaY
+            }
+          }}
+        >
           <button
             type="button"
             className={`settings-tab-btn ${activeTab === 'general' ? 'active' : ''}`}
@@ -499,122 +626,147 @@ export default function SettingsModal({ isOpen, onClose, theme, onThemeChange, o
           {/* TAB 6: ATAJOS DE TECLADO Y COMANDOS RÁPIDOS */}
           {activeTab === 'shortcuts' && (
             <div className="settings-section">
+              <div className="settings-shortcuts-top-bar">
+                <div className="settings-shortcuts-intro">
+                  Personaliza los atajos globales de Windows para controlar tu música mientras juegas o trabajas. Haz clic en ✏️ para reasignar cualquier comando.
+                </div>
+                <button
+                  type="button"
+                  className="settings-shortcut-reset-all-btn"
+                  onClick={handleResetAllHotkeys}
+                  title="Restablecer todos los comandos a sus combinaciones por defecto"
+                >
+                  ↺ Restablecer por defecto
+                </button>
+              </div>
+
+              {hotkeyFeedback && (
+                <div className={`settings-shortcut-feedback ${hotkeyFeedback.success ? 'success' : 'error'}`}>
+                  {hotkeyFeedback.success || hotkeyFeedback.error}
+                </div>
+              )}
+
               <div className="settings-shortcuts-category">
                 <h4 className="settings-shortcuts-category-title">🪟 Ventana & Control del Sistema (Globales)</h4>
                 <div className="settings-shortcuts-grid">
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Abrir / Restaurar Ventana Principal</div>
-                      <div className="settings-shortcut-desc">Restaura y enfoca la aplicación inmediatamente desde segundo plano o minimizada</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">Shift</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">R</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Fijar en Primer Plano (Always on Top)</div>
-                      <div className="settings-shortcut-desc">Alterna si el reproductor permanece siempre sobre las demás ventanas abiertas</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">Shift</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">F</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Mini Panel Lateral Rápido</div>
-                      <div className="settings-shortcut-desc">Muestra u oculta la barra vertical del lateral derecho de tu pantalla</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">Shift</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">M</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">HUD / Widget Flotante de Juego</div>
-                      <div className="settings-shortcut-desc">Activa o esconde la mini cápsula flotante sobre videojuegos a pantalla completa</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">Alt</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">H</kbd>
-                    </div>
-                  </div>
+                  {[
+                    { key: 'restoreMainWindow', defaultTitle: 'Abrir / Restaurar Ventana Principal', defaultDesc: 'Restaura y enfoca la aplicación inmediatamente desde segundo plano o minimizada', defaultKey: 'Ctrl+Shift+R' },
+                    { key: 'toggleAlwaysOnTop', defaultTitle: 'Fijar en Primer Plano (Always on Top)', defaultDesc: 'Alterna si el reproductor permanece siempre sobre las demás ventanas abiertas', defaultKey: 'Ctrl+Shift+F' },
+                    { key: 'togglePanel', defaultTitle: 'Mini Panel Lateral Rápido', defaultDesc: 'Muestra u oculta la barra vertical del lateral derecho de tu pantalla', defaultKey: 'Ctrl+Shift+M' },
+                    { key: 'toggleOverlay', defaultTitle: 'HUD / Widget Flotante de Juego', defaultDesc: 'Activa o esconde la mini cápsula flotante sobre videojuegos a pantalla completa', defaultKey: 'Ctrl+Alt+H' }
+                  ].map((item) => {
+                    const info = hotkeysMap[item.key] || {}
+                    const shortcut = info.shortcut || item.defaultKey
+                    const isEditing = editingAction === item.key
+                    const isCustom = shortcut !== item.defaultKey
+                    return (
+                      <div className="settings-shortcut-card" key={item.key}>
+                        <div className="settings-shortcut-info">
+                          <div className="settings-shortcut-name">{info.title || item.defaultTitle}</div>
+                          <div className="settings-shortcut-desc">{info.desc || item.defaultDesc}</div>
+                        </div>
+                        <div className="settings-shortcut-actions">
+                          {isEditing ? (
+                            <button
+                              type="button"
+                              className="settings-shortcut-btn recording"
+                              onClick={() => setEditingAction(null)}
+                              title="Presiona la nueva combinación de teclas en tu teclado (Esc para cancelar)"
+                            >
+                              Presiona teclas... (Esc)
+                            </button>
+                          ) : (
+                            <>
+                              {renderShortcutKeys(shortcut)}
+                              <button
+                                type="button"
+                                className="settings-shortcut-btn"
+                                onClick={() => setEditingAction(item.key)}
+                                title="Cambiar combinación de teclas"
+                              >
+                                ✏️
+                              </button>
+                              {isCustom && (
+                                <button
+                                  type="button"
+                                  className="settings-shortcut-btn"
+                                  onClick={() => handleResetSingleHotkey(item.key, item.defaultKey)}
+                                  title="Restablecer a combinación por defecto"
+                                >
+                                  ↺
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
               <div className="settings-shortcuts-category">
-                <h4 className="settings-shortcuts-category-title">🎵 Reproducción & Audio</h4>
+                <h4 className="settings-shortcuts-category-title">🎵 Reproducción & Audio (Globales)</h4>
                 <div className="settings-shortcuts-grid">
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Reproducir / Pausar</div>
-                      <div className="settings-shortcut-desc">Pausa o reanuda la música al instante</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">Espacio</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Pista Siguiente</div>
-                      <div className="settings-shortcut-desc">Avanza a la próxima canción en la cola</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">→</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Pista Anterior</div>
-                      <div className="settings-shortcut-desc">Vuelve a la canción anterior del historial</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">←</kbd>
-                    </div>
-                  </div>
-
-                  <div className="settings-shortcut-card">
-                    <div className="settings-shortcut-info">
-                      <div className="settings-shortcut-name">Subir / Bajar Volumen</div>
-                      <div className="settings-shortcut-desc">Ajusta el volumen en pasos de ±5% (o usa la rueda del ratón en el HUD)</div>
-                    </div>
-                    <div className="settings-shortcut-keys">
-                      <kbd className="settings-kbd">Ctrl</kbd>
-                      <span>+</span>
-                      <kbd className="settings-kbd">↑ / ↓</kbd>
-                    </div>
-                  </div>
+                  {[
+                    { key: 'playPause', defaultTitle: 'Reproducir / Pausar', defaultDesc: 'Pausa o reanuda la música al instante', defaultKey: 'Ctrl+Space' },
+                    { key: 'next', defaultTitle: 'Pista Siguiente', defaultDesc: 'Avanza a la próxima canción en la cola', defaultKey: 'Ctrl+Right' },
+                    { key: 'previous', defaultTitle: 'Pista Anterior', defaultDesc: 'Vuelve a la canción anterior del historial', defaultKey: 'Ctrl+Left' },
+                    { key: 'volumeUp', defaultTitle: 'Subir Volumen (+5%)', defaultDesc: 'Aumenta el volumen un 5% de forma global', defaultKey: 'Ctrl+Up' },
+                    { key: 'volumeDown', defaultTitle: 'Bajar Volumen (-5%)', defaultDesc: 'Disminuye el volumen un 5% de forma global', defaultKey: 'Ctrl+Down' }
+                  ].map((item) => {
+                    const info = hotkeysMap[item.key] || {}
+                    const shortcut = info.shortcut || item.defaultKey
+                    const isEditing = editingAction === item.key
+                    const isCustom = shortcut !== item.defaultKey
+                    return (
+                      <div className="settings-shortcut-card" key={item.key}>
+                        <div className="settings-shortcut-info">
+                          <div className="settings-shortcut-name">{info.title || item.defaultTitle}</div>
+                          <div className="settings-shortcut-desc">{info.desc || item.defaultDesc}</div>
+                        </div>
+                        <div className="settings-shortcut-actions">
+                          {isEditing ? (
+                            <button
+                              type="button"
+                              className="settings-shortcut-btn recording"
+                              onClick={() => setEditingAction(null)}
+                              title="Presiona la nueva combinación de teclas en tu teclado (Esc para cancelar)"
+                            >
+                              Presiona teclas... (Esc)
+                            </button>
+                          ) : (
+                            <>
+                              {renderShortcutKeys(shortcut)}
+                              <button
+                                type="button"
+                                className="settings-shortcut-btn"
+                                onClick={() => setEditingAction(item.key)}
+                                title="Cambiar combinación de teclas"
+                              >
+                                ✏️
+                              </button>
+                              {isCustom && (
+                                <button
+                                  type="button"
+                                  className="settings-shortcut-btn"
+                                  onClick={() => handleResetSingleHotkey(item.key, item.defaultKey)}
+                                  title="Restablecer a combinación por defecto"
+                                >
+                                  ↺
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
               <div className="settings-shortcuts-category">
-                <h4 className="settings-shortcuts-category-title">⚡ Navegación & Búsqueda</h4>
+                <h4 className="settings-shortcuts-category-title">⚡ Navegación & Búsqueda (En Ventana)</h4>
                 <div className="settings-shortcuts-grid">
                   <div className="settings-shortcut-card">
                     <div className="settings-shortcut-info">

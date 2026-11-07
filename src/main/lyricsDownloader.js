@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import NodeID3 from 'node-id3'
 
 // Caché en memoria para respuestas instantáneas (0ms) al volver a reproducir o abrir el panel de letras
 const memoryLyricsCache = new Map()
@@ -153,7 +154,7 @@ export async function fetchLyricsFromLRCLIB(title, artist, duration = 0) {
 /**
  * Guarda manualmente o en modo permanente un archivo .lrc junto a la canción
  */
-export async function saveTrackLrcFile(trackPath, lyricsText) {
+export async function saveTrackLrcFile(trackPath, lyricsText, realMusicDir = null) {
   if (!trackPath || !lyricsText || typeof lyricsText !== 'string') {
     return { success: false, error: 'Datos de letra inválidos' }
   }
@@ -161,31 +162,75 @@ export async function saveTrackLrcFile(trackPath, lyricsText) {
     const normalizedPath = path.normalize(trackPath)
     const dir = path.dirname(normalizedPath)
     const baseName = path.basename(normalizedPath, path.extname(normalizedPath))
+    const extName = path.extname(normalizedPath).toLowerCase()
     const hasTimestamps = /\[\d{1,2}:\d{2}/.test(lyricsText)
     const ext = hasTimestamps ? '.lrc' : '.txt'
     const targetFile = path.join(dir, `${baseName}${ext}`)
+
+    // 1. Guardar archivo .lrc en la carpeta de la pista
     await fs.promises.writeFile(targetFile, lyricsText, 'utf8')
-    return { success: true, filePath: targetFile }
+
+    // 2. Si existe carpeta Canciones_reales, guardar también allí para el archivo maestro
+    if (realMusicDir && fs.existsSync(realMusicDir)) {
+      try {
+        const masterLrc = path.join(realMusicDir, `${baseName}${ext}`)
+        await fs.promises.writeFile(masterLrc, lyricsText, 'utf8')
+      } catch (err) {
+        console.warn('Aviso guardando lrc en Canciones_reales:', err.message)
+      }
+    }
+
+    // 3. Incrustar letras en las etiquetas del archivo de audio original y todos sus hard links
+    if (extName === '.mp3') {
+      try {
+        const tags = {
+          unsynchronisedLyrics: {
+            language: 'eng',
+            text: lyricsText
+          }
+        }
+        NodeID3.update(tags, normalizedPath)
+
+        if (realMusicDir) {
+          const masterPath = path.join(realMusicDir, path.basename(normalizedPath))
+          if (fs.existsSync(masterPath)) {
+            try {
+              NodeID3.update(tags, masterPath)
+            } catch (_) {}
+          }
+        }
+      } catch (tagErr) {
+        console.warn('Aviso incrustando letras en ID3:', tagErr.message)
+      }
+    }
+
+    // Actualizar caché en memoria para respuesta instantánea
+    memoryLyricsCache.set(normalizedPath.toLowerCase(), {
+      lyrics: lyricsText,
+      savedToDisk: true,
+      source: 'lrc',
+      synced: hasTimestamps
+    })
+
+    return { success: true, filePath: targetFile, synced: hasTimestamps }
   } catch (err) {
     return { success: false, error: err.message }
   }
 }
 
-/**
- * Elimina el archivo .lrc / .txt externo asociado a una canción si la versión descargada no coincide
- */
 export async function deleteTrackLrcFile(trackPath, realMusicDir = null) {
   if (!trackPath) return { success: false, error: 'Ruta inválida' }
   try {
     const normalizedPath = path.normalize(trackPath)
     const dir = path.dirname(normalizedPath)
     const baseName = path.parse(normalizedPath).name
+    const extName = path.extname(normalizedPath).toLowerCase()
     const candidates = [
       path.join(dir, `${baseName}.lrc`),
       path.join(dir, `${baseName}.LRC`),
       path.join(dir, `${baseName}.txt`)
     ]
-    if (realMusicDir) {
+    if (realMusicDir && fs.existsSync(realMusicDir)) {
       candidates.push(
         path.join(realMusicDir, `${baseName}.lrc`),
         path.join(realMusicDir, `${baseName}.LRC`),
@@ -196,10 +241,49 @@ export async function deleteTrackLrcFile(trackPath, realMusicDir = null) {
     let deletedAny = false
     for (const file of candidates) {
       if (fs.existsSync(file)) {
-        await fs.promises.unlink(file)
-        deletedAny = true
+        try {
+          await fs.promises.unlink(file)
+          deletedAny = true
+        } catch (_) {}
       }
     }
+
+    // Sacar las letras de las etiquetas del archivo original y sus hard links
+    if (extName === '.mp3') {
+      try {
+        const tags = NodeID3.read(normalizedPath)
+        if (tags) {
+          delete tags.unsynchronisedLyrics
+          delete tags.synchronisedLyrics
+          if (tags.raw) {
+            delete tags.raw.USLT
+            delete tags.raw.SYLT
+          }
+          NodeID3.write(tags, normalizedPath)
+        }
+
+        if (realMusicDir) {
+          const masterPath = path.join(realMusicDir, path.basename(normalizedPath))
+          if (fs.existsSync(masterPath)) {
+            try {
+              const mTags = NodeID3.read(masterPath)
+              if (mTags) {
+                delete mTags.unsynchronisedLyrics
+                delete mTags.synchronisedLyrics
+                if (mTags.raw) {
+                  delete mTags.raw.USLT
+                  delete mTags.raw.SYLT
+                }
+                NodeID3.write(mTags, masterPath)
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (tagErr) {
+        console.warn('Aviso eliminando letras en ID3:', tagErr.message)
+      }
+    }
+
     memoryLyricsCache.delete(normalizedPath.toLowerCase())
     return { success: true, deleted: deletedAny }
   } catch (err) {
@@ -207,10 +291,6 @@ export async function deleteTrackLrcFile(trackPath, realMusicDir = null) {
   }
 }
 
-/**
- * Obtiene letras sincronizadas para una pista local (en memoria temporal o guardando .lrc según configuración).
- * NO modifica ni incrusta etiquetas dentro del archivo .mp3 para no alterar el archivo original ni interrumpir la reproducción.
- */
 export async function downloadTrackMetadataAndLyrics(trackPath, title, artist, duration = 0, options = {}) {
   if (!trackPath) return { success: false, error: 'Ruta de archivo inválida' }
 

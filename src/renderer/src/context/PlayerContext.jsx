@@ -861,43 +861,76 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     loadLyricsForTrack(currentTrack)
   }, [isMiniPanel, currentTrack?.path, appSettings.autoLyrics, loadLyricsForTrack])
 
-  // Guardar manualmente en archivo .lrc una letra que estaba en modo temporal
+  // Formateador auxiliar de marcas de tiempo LRC [mm:ss.xx]
+  const formatTimeTag = (seconds) => {
+    const m = Math.floor(seconds / 60)
+    const s = Math.floor(seconds % 60)
+    const ms = Math.floor((seconds % 1) * 100)
+    return `[${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(2, '0')}]`
+  }
+
+  // Guardar e incrustar permanentemente archivo .lrc y tags ID3 en el archivo original y todos sus hard links
   const saveCurrentLyricsToDisk = useCallback(async () => {
-    if (!currentTrack?.path || !currentLyrics?.rawLyrics || !window.electronAPI?.saveTrackLrc) {
+    if (!currentTrack?.path || !window.electronAPI?.saveTrackLrc) {
       return { success: false }
     }
+
+    let lyricsText = currentLyrics?.rawLyrics
+    if (!lyricsText && Array.isArray(currentLyrics?.lines) && currentLyrics.lines.length > 0) {
+      const isSynced = Boolean(currentLyrics.synced)
+      lyricsText = currentLyrics.lines
+        .map((l) => (isSynced && typeof l.time === 'number') ? `${formatTimeTag(l.time)} ${l.text}` : l.text)
+        .join('\n')
+    }
+
+    if (!lyricsText || typeof lyricsText !== 'string' || !lyricsText.trim()) {
+      return { success: false, error: 'No hay letras para guardar' }
+    }
+
     const res = await window.electronAPI.saveTrackLrc({
       trackPath: currentTrack.path,
-      lyricsText: currentLyrics.rawLyrics
+      lyricsText
     })
+
     if (res?.success) {
-      const isSynced = Boolean(currentLyrics?.synced)
+      const isSynced = Boolean(res.synced ?? currentLyrics?.synced ?? /\[\d{1,2}:\d{2}/.test(lyricsText))
       setCurrentLyrics((prev) => ({
         ...prev,
         source: 'lrc',
-        savedToDisk: true
+        savedToDisk: true,
+        synced: isSynced,
+        rawLyrics: lyricsText
       }))
       setCurrentTrack((prev) => (prev ? { ...prev, hasLyrics: true, syncedLyrics: isSynced } : prev))
+
+      const isSameTrack = (t) => {
+        if (!t) return false
+        return t.path === currentTrack.path ||
+          (t.ino && currentTrack.ino && String(t.ino) === String(currentTrack.ino)) ||
+          (t.uniqueKey && currentTrack.uniqueKey && t.uniqueKey === currentTrack.uniqueKey)
+      }
+
       setRawLibrary((prevLib) => {
         if (!Array.isArray(prevLib)) return prevLib
         return prevLib.map((album) => ({
           ...album,
           tracks: (album.tracks || []).map((t) =>
-            t.path === currentTrack.path ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
+            isSameTrack(t) ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
           )
         }))
       })
+
       setPlaylist((prevList) => {
         if (!Array.isArray(prevList)) return prevList
         return prevList.map((t) =>
-          t.path === currentTrack.path ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
+          isSameTrack(t) ? { ...t, hasLyrics: true, syncedLyrics: isSynced } : t
         )
       })
     }
     return res
-  }, [currentTrack?.path, currentLyrics?.rawLyrics, currentLyrics?.synced])
+  }, [currentTrack?.path, currentTrack?.ino, currentTrack?.uniqueKey, currentLyrics?.rawLyrics, currentLyrics?.lines, currentLyrics?.synced])
 
-  // Eliminar archivo .lrc local si la letra descargada previamente no corresponde a la versión de la canción
+  // Eliminar archivo .lrc y quitar las letras de las etiquetas del archivo original y sus hard links
   const deleteCurrentLyricsFromDisk = useCallback(async () => {
     if (!currentTrack?.path || !window.electronAPI?.deleteTrackLrc) {
       return { success: false }
@@ -915,24 +948,33 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         matchedTrack: null
       })
       setCurrentTrack((prev) => (prev ? { ...prev, hasLyrics: false, syncedLyrics: false } : prev))
+
+      const isSameTrack = (t) => {
+        if (!t) return false
+        return t.path === currentTrack.path ||
+          (t.ino && currentTrack.ino && String(t.ino) === String(currentTrack.ino)) ||
+          (t.uniqueKey && currentTrack.uniqueKey && t.uniqueKey === currentTrack.uniqueKey)
+      }
+
       setRawLibrary((prevLib) => {
         if (!Array.isArray(prevLib)) return prevLib
         return prevLib.map((album) => ({
           ...album,
           tracks: (album.tracks || []).map((t) =>
-            t.path === currentTrack.path ? { ...t, hasLyrics: false, syncedLyrics: false } : t
+            isSameTrack(t) ? { ...t, hasLyrics: false, syncedLyrics: false } : t
           )
         }))
       })
+
       setPlaylist((prevList) => {
         if (!Array.isArray(prevList)) return prevList
         return prevList.map((t) =>
-          t.path === currentTrack.path ? { ...t, hasLyrics: false, syncedLyrics: false } : t
+          isSameTrack(t) ? { ...t, hasLyrics: false, syncedLyrics: false } : t
         )
       })
     }
     return res
-  }, [currentTrack?.path])
+  }, [currentTrack?.path, currentTrack?.ino, currentTrack?.uniqueKey])
 
   // Reintentar búsqueda de letra en línea
   const retryOnlineLyrics = useCallback(() => {
@@ -1657,7 +1699,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         return
       }
 
-      if (typeof cmd === 'string' && cmd.startsWith('volume-')) {
+      if (cmd === 'volume-up') {
+        adjustVolume(0.05)
+        return
+      }
+
+      if (cmd === 'volume-down') {
+        adjustVolume(-0.05)
+        return
+      }
+
+      if (typeof cmd === 'string' && /^volume-[\d.]+$/.test(cmd)) {
         const v = parseFloat(cmd.replace('volume-', ''))
         if (!isNaN(v)) {
           setVolumeLevel(v)
@@ -1677,12 +1729,6 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         case 'toggle-play': togglePlay(); break
         case 'toggle-shuffle': toggleShuffle(); break
         case 'toggle-loop': toggleLoop(); break
-        case 'volume-up':
-          adjustVolume(0.05)
-          break
-        case 'volume-down':
-          adjustVolume(-0.05)
-          break
         default: break
       }
     })
@@ -1839,19 +1885,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
       }
 
-      // 4. Si coincide por nombre de archivo dentro de la carpeta del álbum destino
-      if (!trackToDelete && targetAlbum.path && track.path) {
-        const fileName = track.path.split(/[\\/]/).pop()
-        if (fileName && targetAlbum.tracks) {
-          trackToDelete = targetAlbum.tracks.find((t) => {
-            const tFile = (t.path || '').split(/[\\/]/).pop()
-            return tFile && fileName && tFile.toLowerCase() === fileName.toLowerCase()
-          })
-        }
-      }
-
-      // 5. Fallback si es el único álbum restante y tenemos la pista
-      if (!trackToDelete && track.path) {
+      // 4. Fallback seguro: solo si es el único álbum restante y tenemos la ruta exacta de la pista
+      if (!trackToDelete && isLastAlbumLink && track.path) {
         trackToDelete = track
       }
 

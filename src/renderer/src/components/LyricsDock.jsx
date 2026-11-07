@@ -93,18 +93,21 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
   }
 
   const handleSaveLrc = async () => {
-    const ok = await saveCurrentLyricsToDisk()
-    if (ok) {
-      setActionFeedback('Guardada en .lrc')
-      setTimeout(() => setActionFeedback(null), 2200)
+    const res = await saveCurrentLyricsToDisk()
+    if (res?.success) {
+      setActionFeedback('Guardada e incrustada')
+      setTimeout(() => setActionFeedback(null), 2500)
+    } else if (res?.error) {
+      setActionFeedback(res.error)
+      setTimeout(() => setActionFeedback(null), 2500)
     }
   }
 
   const handleDeleteLrc = async () => {
-    const ok = await deleteCurrentLyricsFromDisk()
-    if (ok) {
-      setActionFeedback('Archivo .lrc eliminado')
-      setTimeout(() => setActionFeedback(null), 2200)
+    const res = await deleteCurrentLyricsFromDisk()
+    if (res?.success) {
+      setActionFeedback('Letra y tags eliminados')
+      setTimeout(() => setActionFeedback(null), 2500)
     }
   }
 
@@ -147,23 +150,23 @@ export default function LyricsDock({ isOpen, onClose, currentTrack, seekTo }) {
         </div>
 
         <div className="lyrics-dock-controls">
-          {!isLoadingLyrics && isTemporary && currentLyrics?.raw && (
+          {!isLoadingLyrics && (hasLines || Boolean(currentLyrics?.rawLyrics)) && (
             <button
               type="button"
               className="lyrics-dock-action-pill"
               onClick={handleSaveLrc}
-              title="Guardar esta letra como archivo .lrc permanente para esta canción"
+              title="Guardar e incrustar letra en archivo original y todos sus enlaces duros (actualiza símbolo de letras)"
             >
               💾 Guardar .lrc
             </button>
           )}
 
-          {!isLoadingLyrics && isSavedOnDisk && (
+          {!isLoadingLyrics && (hasLines || isSavedOnDisk || Boolean(currentTrack?.hasLyrics)) && (
             <button
               type="button"
               className="lyrics-dock-action-pill danger"
               onClick={handleDeleteLrc}
-              title="Eliminar archivo .lrc local si la versión de la letra no coincide"
+              title="Eliminar archivo .lrc y quitar letra del archivo original y todos sus enlaces duros (elimina símbolo de letras)"
             >
               🗑️ Quitar .lrc
             </button>

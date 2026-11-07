@@ -1,77 +1,203 @@
-import { globalShortcut } from 'electron'
+import fs from 'fs'
+import path from 'path'
+import { app, globalShortcut } from 'electron'
 
 /**
- * =============================================
- * CONFIGURACIÓN DE ATAJOS DE TECLADO GLOBALES
- * =============================================
- * 
- * Modifica estas constantes para cambiar los atajos.
- * Formato: Combinación de modificadores + tecla
- * Modificadores: Ctrl, Alt, Shift, Super/Meta
- * 
- * Ejemplos:
- *   'Ctrl+Right'       → Ctrl + Flecha Derecha
- *   'Alt+Shift+N'      → Alt + Shift + N
- *   'MediaNextTrack'   → Tecla multimedia Siguiente
+ * Atajos de teclado por defecto
  */
-export const HOTKEY_CONFIG = {
-  // Siguiente canción (Flecha, Multimedia o Ctrl+Alt para gamers)
-  next: ['Ctrl+Right', 'MediaNextTrack', 'Ctrl+Alt+Right'],
-  
-  // Canción anterior
-  previous: ['Ctrl+Left', 'MediaPreviousTrack', 'Ctrl+Alt+Left'],
-
-  // Play / Pausa
-  playPause: ['MediaPlayPause', 'Ctrl+Shift+Space', 'Ctrl+Alt+Space', 'Ctrl+Space'],
-
-  // Subir volumen (+5%)
-  volumeUp: ['Ctrl+Up', 'Ctrl+Alt+Up'],
-
-  // Bajar volumen (-5%)
-  volumeDown: ['Ctrl+Down', 'Ctrl+Alt+Down'],
-  
-  // Mostrar/ocultar panel lateral
-  togglePanel: ['Ctrl+Shift+M', 'Ctrl+Alt+M'],
-
-  // Mostrar/ocultar HUD flotante de juego (Game Overlay)
-  toggleOverlay: ['Ctrl+Alt+H', 'Ctrl+Shift+H'],
-
-  // Abrir / Restaurar y enfocar la ventana principal
-  restoreMainWindow: ['Ctrl+Shift+R', 'Ctrl+Alt+R'],
-
-  // Fijar / Desfijar ventana principal en primer plano (Always on Top)
-  toggleAlwaysOnTop: ['Ctrl+Shift+F', 'Ctrl+Alt+F', 'Ctrl+Shift+T']
+export const DEFAULT_HOTKEYS = {
+  restoreMainWindow: 'Ctrl+Shift+R',
+  toggleAlwaysOnTop: 'Ctrl+Shift+F',
+  togglePanel: 'Ctrl+Shift+M',
+  toggleOverlay: 'Ctrl+Alt+H',
+  playPause: 'Ctrl+Space',
+  next: 'Ctrl+Right',
+  previous: 'Ctrl+Left',
+  volumeUp: 'Ctrl+Up',
+  volumeDown: 'Ctrl+Down'
 }
 
+/**
+ * Atajos secundarios / multimedia que siempre se registran en paralelo como respaldo
+ */
+export const SECONDARY_HOTKEYS = {
+  restoreMainWindow: ['Ctrl+Alt+R'],
+  toggleAlwaysOnTop: ['Ctrl+Alt+F', 'Ctrl+Shift+T'],
+  togglePanel: ['Ctrl+Alt+M'],
+  toggleOverlay: ['Ctrl+Shift+H'],
+  playPause: ['MediaPlayPause', 'Ctrl+Shift+Space', 'Ctrl+Alt+Space'],
+  next: ['MediaNextTrack', 'Ctrl+Alt+Right'],
+  previous: ['MediaPreviousTrack', 'Ctrl+Alt+Left'],
+  volumeUp: ['Ctrl+Alt+Up', 'Ctrl+Shift+Up', 'VolumeUp'],
+  volumeDown: ['Ctrl+Alt+Down', 'Ctrl+Shift+Down', 'VolumeDown']
+}
+
+export const HOTKEY_METADATA = {
+  restoreMainWindow: {
+    category: 'window',
+    title: 'Abrir / Restaurar Ventana Principal',
+    desc: 'Restaura y enfoca la aplicación inmediatamente desde segundo plano o minimizada'
+  },
+  toggleAlwaysOnTop: {
+    category: 'window',
+    title: 'Fijar en Primer Plano (Always on Top)',
+    desc: 'Alterna si el reproductor permanece siempre sobre las demás ventanas abiertas'
+  },
+  togglePanel: {
+    category: 'window',
+    title: 'Mini Panel Lateral Rápido',
+    desc: 'Muestra u oculta la barra vertical del lateral derecho de tu pantalla'
+  },
+  toggleOverlay: {
+    category: 'window',
+    title: 'HUD / Widget Flotante de Juego',
+    desc: 'Activa o esconde la mini cápsula flotante sobre videojuegos a pantalla completa'
+  },
+  playPause: {
+    category: 'playback',
+    title: 'Reproducir / Pausar',
+    desc: 'Pausa o reanuda la música al instante'
+  },
+  next: {
+    category: 'playback',
+    title: 'Pista Siguiente',
+    desc: 'Avanza a la próxima canción en la cola'
+  },
+  previous: {
+    category: 'playback',
+    title: 'Pista Anterior',
+    desc: 'Vuelve a la canción anterior del historial'
+  },
+  volumeUp: {
+    category: 'playback',
+    title: 'Subir Volumen (+5%)',
+    desc: 'Aumenta el volumen un 5% de forma global'
+  },
+  volumeDown: {
+    category: 'playback',
+    title: 'Bajar Volumen (-5%)',
+    desc: 'Disminuye el volumen un 5% de forma global'
+  }
+}
+
+let customHotkeys = { ...DEFAULT_HOTKEYS }
 let registeredShortcuts = []
+let activeActionsRef = null
+
+function getConfigFile() {
+  try {
+    return path.join(app.getPath('userData'), 'hotkeys.json')
+  } catch (_) {
+    return null
+  }
+}
+
+export function loadSavedHotkeys() {
+  try {
+    const file = getConfigFile()
+    if (file && fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (data && typeof data === 'object') {
+        customHotkeys = { ...DEFAULT_HOTKEYS, ...data }
+      }
+    }
+  } catch (err) {
+    console.warn('Aviso cargando hotkeys personalizadas:', err.message)
+  }
+  return customHotkeys
+}
+
+export function saveHotkeys(newMap) {
+  try {
+    customHotkeys = { ...DEFAULT_HOTKEYS, ...newMap }
+    const file = getConfigFile()
+    if (file) {
+      fs.writeFileSync(file, JSON.stringify(customHotkeys, null, 2), 'utf8')
+    }
+  } catch (err) {
+    console.warn('Aviso guardando hotkeys personalizadas:', err.message)
+  }
+}
+
+export function getHotkeysConfig() {
+  loadSavedHotkeys()
+  const result = {}
+  for (const [key, meta] of Object.entries(HOTKEY_METADATA)) {
+    result[key] = {
+      action: key,
+      shortcut: customHotkeys[key] || DEFAULT_HOTKEYS[key],
+      defaultShortcut: DEFAULT_HOTKEYS[key],
+      ...meta
+    }
+  }
+  return result
+}
+
+export function updateHotkey(action, accelerator, actions = activeActionsRef) {
+  if (!HOTKEY_METADATA[action]) {
+    return { success: false, error: 'Acción no válida' }
+  }
+  if (!accelerator || typeof accelerator !== 'string') {
+    return { success: false, error: 'Combinación de teclas inválida' }
+  }
+
+  const trimmed = accelerator.trim()
+  customHotkeys[action] = trimmed
+  saveHotkeys(customHotkeys)
+
+  if (actions) {
+    registerHotkeys(actions)
+  }
+
+  return { success: true, hotkeys: getHotkeysConfig() }
+}
+
+export function resetHotkeys(actions = activeActionsRef) {
+  try {
+    const file = getConfigFile()
+    if (file && fs.existsSync(file)) {
+      fs.unlinkSync(file)
+    }
+  } catch (_) {}
+
+  customHotkeys = { ...DEFAULT_HOTKEYS }
+  if (actions) {
+    registerHotkeys(actions)
+  }
+
+  return { success: true, hotkeys: getHotkeysConfig() }
+}
 
 /**
  * Registra los atajos globales con las acciones proporcionadas.
- * Admite tanto un único acelerador como un arreglo de alternativas.
- * @param {Object} actions - { next: fn, previous: fn, playPause: fn, volumeUp: fn, volumeDown: fn, togglePanel: fn }
+ * Admite tanto el atajo configurado por el usuario como los atajos alternativos / multimedia.
  */
 export function registerHotkeys(actions) {
+  activeActionsRef = actions
   unregisterHotkeys()
+  loadSavedHotkeys()
 
-  for (const [action, accelerators] of Object.entries(HOTKEY_CONFIG)) {
-    const actionFn = actions[action]
+  for (const [action, actionFn] of Object.entries(actions)) {
     if (!actionFn) continue
 
-    const list = Array.isArray(accelerators) ? accelerators : [accelerators]
-    for (const accelerator of list) {
+    const primary = customHotkeys[action] || DEFAULT_HOTKEYS[action]
+    const secondaryList = SECONDARY_HOTKEYS[action] || []
+    const candidates = Array.from(new Set([primary, ...secondaryList].filter(Boolean)))
+
+    for (const accelerator of candidates) {
       try {
         const success = globalShortcut.register(accelerator, actionFn)
         if (success) {
           registeredShortcuts.push(accelerator)
-          console.log(`Hotkey registrado: ${accelerator} → ${action}`)
         } else {
-          console.warn(`No se pudo registrar hotkey: ${accelerator}`)
+          console.warn(`No se pudo registrar hotkey global: ${accelerator} para ${action}`)
         }
       } catch (err) {
         console.warn(`Error registrando hotkey ${accelerator}:`, err.message)
       }
     }
   }
+  console.log(`[Hotkeys] ${registeredShortcuts.length} atajos globales activos.`)
 }
 
 /**

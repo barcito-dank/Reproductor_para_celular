@@ -85,14 +85,14 @@ export async function runHardlinksHealthCheck(musicDir, realMusicDir) {
 
     if (hasMatchingIno) {
       healthyCount++
-    } else if (matchingByName && matchingByName.ino !== file.ino) {
+    } else if (matchingByName && matchingByName.ino !== file.ino && matchingByName.size === file.size) {
       divergentCount++
       issues.push({
         type: 'divergent',
         filePath: file.path,
         fileName: file.name,
         masterPath: matchingByName.path,
-        message: `Inodo divergente con Canciones_reales para "${file.name}"`
+        message: `Inodo divergente con Canciones_reales para "${file.name}" (mismo tamaño)`
       })
     } else {
       unlinkedCount++
@@ -100,6 +100,7 @@ export async function runHardlinksHealthCheck(musicDir, realMusicDir) {
         type: 'unlinked',
         filePath: file.path,
         fileName: file.name,
+        ino: file.ino,
         message: `Sin archivo maestro correspondiente en Canciones_reales: "${file.name}"`
       })
     }
@@ -142,22 +143,41 @@ export async function repairHardlinksIntegrity(musicDir, realMusicDir) {
   for (const issue of check.issues) {
     try {
       if (issue.type === 'divergent' && issue.masterPath) {
-        // Unificar inodos preservando archivo maestro
-        await fs.promises.unlink(issue.filePath)
-        await fs.promises.link(issue.masterPath, issue.filePath)
-        repairedCount++
+        const masterSt = await fs.promises.stat(issue.masterPath).catch(() => null)
+        const fileSt = await fs.promises.stat(issue.filePath).catch(() => null)
+        if (masterSt && fileSt && masterSt.size === fileSt.size) {
+          await fs.promises.unlink(issue.filePath)
+          await fs.promises.link(issue.masterPath, issue.filePath)
+          repairedCount++
+        }
       } else if (issue.type === 'unlinked') {
         const destMaster = path.join(realMusicDir, issue.fileName)
+        let masterCandidate = destMaster
         try {
-          await fs.promises.access(destMaster)
-          // Ya existe en destino con otro nombre o inodo; re-enlazar
-          await fs.promises.unlink(issue.filePath)
-          await fs.promises.link(destMaster, issue.filePath)
+          const destSt = await fs.promises.stat(destMaster, { bigint: true })
+          if (issue.ino && destSt.ino === issue.ino) {
+            continue
+          }
+          const ext = path.extname(issue.fileName)
+          const base = path.basename(issue.fileName, ext)
+          let counter = 1
+          masterCandidate = path.join(realMusicDir, `${base} (${counter})${ext}`)
+          while (fs.existsSync(masterCandidate)) {
+            const candSt = await fs.promises.stat(masterCandidate, { bigint: true }).catch(() => null)
+            if (candSt && issue.ino && candSt.ino === issue.ino) {
+              masterCandidate = null
+              break
+            }
+            counter++
+            masterCandidate = path.join(realMusicDir, `${base} (${counter})${ext}`)
+          }
         } catch (_) {
-          // Crear copia/enlace maestro en Canciones_reales
-          await fs.promises.link(issue.filePath, destMaster)
+          // destMaster no existe, usamos destMaster directamente
         }
-        repairedCount++
+        if (masterCandidate) {
+          await fs.promises.link(issue.filePath, masterCandidate)
+          repairedCount++
+        }
       }
     } catch (err) {
       console.warn(`Error reparando archivo ${issue.fileName}:`, err.message)

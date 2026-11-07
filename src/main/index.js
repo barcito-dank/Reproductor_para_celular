@@ -6,7 +6,7 @@ import { spawn } from 'child_process'
 import { parseFile } from 'music-metadata'
 import NodeID3 from 'node-id3'
 import { scanMusicDirectory, removeFromMetadataCache } from './scanner'
-import { registerHotkeys, unregisterHotkeys, HOTKEY_CONFIG } from './hotkeys'
+import { registerHotkeys, unregisterHotkeys, getHotkeysConfig, updateHotkey, resetHotkeys } from './hotkeys'
 import { discordRpc } from './discordRpc'
 import { runHardlinksHealthCheck, repairHardlinksIntegrity } from './hardlinksHealth'
 import { downloadTrackMetadataAndLyrics, saveTrackLrcFile, deleteTrackLrcFile } from './lyricsDownloader'
@@ -1199,8 +1199,20 @@ ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums,
           await fs.promises.link(sourceTrackPath, destPath)
         } catch (linkErr) {
           if (linkErr.code === 'EEXIST') {
-            await fs.promises.unlink(destPath)
-            await fs.promises.link(sourceTrackPath, destPath)
+            const destSt = await fs.promises.stat(destPath, { bigint: true }).catch(() => null)
+            const srcSt = await fs.promises.stat(sourceTrackPath, { bigint: true }).catch(() => null)
+            if (destSt && srcSt && destSt.ino === srcSt.ino) {
+              // Ya está enlazado a este álbum con el mismo inodo
+            } else {
+              const parsed = path.parse(fileName)
+              let count = 2
+              let safeDest = path.join(album.path, `${parsed.name} (${count})${parsed.ext}`)
+              while (fs.existsSync(safeDest)) {
+                count++
+                safeDest = path.join(album.path, `${parsed.name} (${count})${parsed.ext}`)
+              }
+              await fs.promises.link(sourceTrackPath, safeDest)
+            }
           } else if (linkErr.code === 'EXDEV') {
             await fs.promises.copyFile(sourceTrackPath, destPath)
           } else {
@@ -1357,17 +1369,19 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
       let masterPath = null
       let masterIno = 0n
 
-      // 1. Vía directa: por mismo nombre de archivo en Canciones_reales
+      // 1. Vía directa: por mismo nombre de archivo en Canciones_reales SOLO si coincide inodo
       const directCandidate = path.join(realDir, primaryFileName)
       if (fs.existsSync(directCandidate)) {
-        masterPath = directCandidate
         try {
           const mst = await fs.promises.stat(directCandidate, { bigint: true })
-          masterIno = mst.ino || 0n
+          if (currentIno && currentIno > 0n && mst.ino === currentIno) {
+            masterPath = directCandidate
+            masterIno = mst.ino
+          }
         } catch (_) {}
       }
 
-      // 2. Si no se encontró por nombre, buscar por inodo NTFS en Canciones_reales
+      // 2. Si no se encontró por coincidencia directa de inodo, buscar recursivamente por inodo NTFS en Canciones_reales
       if (!masterPath && currentIno && currentIno > 0n) {
         const matches = await findRealMusicFilesByInode(currentIno, null)
         if (matches && matches.length > 0) {
@@ -1378,35 +1392,27 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
 
       if (masterPath) {
         removeFromMetadataCache(masterPath)
-
-        if (primaryExt === '.mp3') {
-          // Si el inodo es diferente (desincronizado por ediciones independientes o copias antiguas),
-          // unificar y re-vincular para garantizar inodo 100% compartido entre Canciones_reales y canciones_organizadas
-          if (masterIno && currentIno && masterIno !== currentIno) {
-            console.log(`[ID3 Sync] Sincronizando inodos divergentes con Canciones_reales: ${masterPath}`)
-            NodeID3.update(tags, masterPath)
-
-            // Re-enlazar todas las instancias de canciones_organizadas al archivo maestro unificado
-            for (const orgPath of validNormalizedPaths) {
-              try {
-                await unlinkWithRetry(orgPath)
-                await fs.promises.link(masterPath, orgPath)
-                removeFromMetadataCache(orgPath)
-              } catch (relinkErr) {
-                console.warn(`[ID3 Sync] Aviso al re-enlazar inodo en ${orgPath}:`, relinkErr.message)
-              }
-            }
-          } else if (!writtenInodes.has(masterIno)) {
-            NodeID3.update(tags, masterPath)
-          }
+        if (primaryExt === '.mp3' && !writtenInodes.has(masterIno)) {
+          NodeID3.update(tags, masterPath)
         }
       } else {
         // Si aún no existía en Canciones_reales, crear un Hard Link hacia Canciones_reales como archivo maestro
         try {
-          const newMaster = path.join(realDir, primaryFileName)
-          await fs.promises.link(primaryPath, newMaster)
-          removeFromMetadataCache(newMaster)
-          console.log(`[ID3 Sync] Nuevo archivo maestro enlazado en Canciones_reales: ${newMaster}`)
+          let targetMasterName = primaryFileName
+          let masterDest = path.join(realDir, targetMasterName)
+          const ext = path.extname(primaryFileName)
+          const base = path.basename(primaryFileName, ext)
+          let counter = 1
+          while (fs.existsSync(masterDest)) {
+            const destSt = await fs.promises.stat(masterDest, { bigint: true }).catch(() => null)
+            if (destSt && currentIno && destSt.ino === currentIno) break
+            targetMasterName = `${base} (${counter})${ext}`
+            masterDest = path.join(realDir, targetMasterName)
+            counter++
+          }
+          await fs.promises.link(primaryPath, masterDest)
+          removeFromMetadataCache(masterDest)
+          console.log(`[ID3 Sync] Nuevo archivo maestro enlazado en Canciones_reales: ${masterDest}`)
         } catch (createMasterErr) {
           console.warn('[ID3 Sync] No se pudo crear enlace maestro en Canciones_reales:', createMasterErr.message)
         }
@@ -2063,19 +2069,41 @@ ipcMain.handle('fetch-track-lyrics-online', async (_, { trackPath, title, artist
 })
 
 ipcMain.handle('save-track-lrc', async (_, { trackPath, lyricsText }) => {
-  removeFromMetadataCache(trackPath)
+  let ino = null
+  try {
+    const st = await fs.promises.stat(trackPath, { bigint: true })
+    ino = st.ino
+  } catch (_) {}
+  removeFromMetadataCache(trackPath, ino)
   const realMusicDir = await getRealMusicDirectory()
   const res = await saveTrackLrcFile(trackPath, lyricsText, realMusicDir)
-  removeFromMetadataCache(trackPath)
+  removeFromMetadataCache(trackPath, ino)
   return res
 })
 
 ipcMain.handle('delete-track-lrc', async (_, { trackPath }) => {
-  removeFromMetadataCache(trackPath)
+  let ino = null
+  try {
+    const st = await fs.promises.stat(trackPath, { bigint: true })
+    ino = st.ino
+  } catch (_) {}
+  removeFromMetadataCache(trackPath, ino)
   const realMusicDir = await getRealMusicDirectory()
   const res = await deleteTrackLrcFile(trackPath, realMusicDir)
-  removeFromMetadataCache(trackPath)
+  removeFromMetadataCache(trackPath, ino)
   return res
+})
+
+ipcMain.handle('get-hotkeys-config', () => {
+  return getHotkeysConfig()
+})
+
+ipcMain.handle('update-hotkey', (_, { action, accelerator }) => {
+  return updateHotkey(action, accelerator)
+})
+
+ipcMain.handle('reset-hotkeys', () => {
+  return resetHotkeys()
 })
 
 ipcMain.handle('batch-download-lyrics', async () => {

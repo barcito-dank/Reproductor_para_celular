@@ -686,9 +686,17 @@ async function saveSongAlbumsModel(persistedIndex, baseDir, userDataDir) {
   }
 }
 
-function removeFromMetadataCache(filePath) {
+function removeFromMetadataCache(filePath, ino = null) {
   if (filePath && metadataCache[filePath]) {
     delete metadataCache[filePath]
+  }
+  if (ino) {
+    const inoStr = String(ino)
+    for (const [key, val] of Object.entries(metadataCache)) {
+      if (val?.data?.ino && String(val.data.ino) === inoStr) {
+        delete metadataCache[key]
+      }
+    }
   }
 }
 
