@@ -1464,7 +1464,7 @@ function Sidebar({ isOpen = true, onToggle }) {
     )
   }
 
-  // Loading state
+  // Loading state (Skeleton elegante y profesional sin saltos de layout)
   if (isLoading) {
     return (
       <aside className="sidebar">
@@ -1480,9 +1480,18 @@ function Sidebar({ isOpen = true, onToggle }) {
             )}
           </div>
         </div>
-        <div className="loading-view">
-          <div className="spinner" />
-          <p style={{ color: 'var(--text-dim)', fontSize: '13px' }}>Escaneando música...</p>
+        <div className="sidebar-skeleton-list">
+          <div className="skeleton-pulse sidebar-skeleton-search" />
+          <div className="sidebar-skeleton-section-label skeleton-pulse" />
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="sidebar-skeleton-item">
+              <div className="skeleton-pulse sidebar-skeleton-thumb" />
+              <div className="sidebar-skeleton-text-group">
+                <div className="skeleton-pulse sidebar-skeleton-title" />
+                <div className="skeleton-pulse sidebar-skeleton-subtitle" />
+              </div>
+            </div>
+          ))}
         </div>
       </aside>
     )

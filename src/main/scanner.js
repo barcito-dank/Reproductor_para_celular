@@ -472,7 +472,15 @@ async function scanDirectoryNode(dir, baseDir, userDataDir, parentPathName = '',
     if (audioFiles.length === 0 && !allowEmpty) return null
 
     const coverFilePath = await findCoverImage(albumPath, folderEntries)
-    const albumCoverUrl = coverFilePath ? toFileUrl(coverFilePath) : null
+    let albumCoverUrl = null
+    if (coverFilePath) {
+      try {
+        const st = await fs.promises.stat(coverFilePath)
+        albumCoverUrl = `${toFileUrl(coverFilePath)}?v=${Math.round(st.mtimeMs)}`
+      } catch (_) {
+        albumCoverUrl = toFileUrl(coverFilePath)
+      }
+    }
 
     const trackDataList = await Promise.all(
       audioFiles.map((audioFile) =>

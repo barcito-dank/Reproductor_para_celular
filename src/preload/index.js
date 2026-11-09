@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   moveAlbumFolder: (payload) => ipcRenderer.invoke('move-album-folder', payload),
   renameAlbumFolder: (payload) => ipcRenderer.invoke('rename-album-folder', payload),
   deleteAlbumFolder: (payload) => ipcRenderer.invoke('delete-album-folder', payload),
+  changeAlbumCover: (payload) => ipcRenderer.invoke('change-album-cover', payload),
 
   // Controles de ventana
   notifyRendererReady: () => ipcRenderer.send('renderer-ready'),

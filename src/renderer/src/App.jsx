@@ -67,6 +67,16 @@ function MainPlayerApp({ theme, onThemeChange }) {
     setIsExtractorOpen(false)
   }, [])
 
+  // Notificar inmediatamente al proceso principal que el DOM y el árbol React están montados
+  // para desplegar la ventana principal sin demoras ni parpadeos
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.electronAPI?.notifyRendererReady?.()
+      })
+    })
+  }, [])
+
   // Sincronizar visibilidad del Panel Lateral
   useEffect(() => {
     let unsubPanelMode = null
@@ -94,6 +104,13 @@ function MainPlayerApp({ theme, onThemeChange }) {
   // Atajos de teclado en la ventana principal
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Bloquear teclas F1 y F2 para neutralizar ayuda del navegador o interferencias
+      if (e.key === 'F1' || e.key === 'F2') {
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
+
       // Atajo global para Buscador Spotlight (Ctrl+K o Ctrl+F)
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
         e.preventDefault()

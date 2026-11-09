@@ -307,8 +307,12 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
     setIsLoading(false)
     if (!isMiniPanel) {
+      // Doble requestAnimationFrame garantiza que React 18 haya aplicado el árbol al DOM
+      // y Chromium haya compuesto el fotograma final antes de revelar la ventana al usuario
       requestAnimationFrame(() => {
-        window.electronAPI?.notifyRendererReady?.()
+        requestAnimationFrame(() => {
+          window.electronAPI?.notifyRendererReady?.()
+        })
       })
     }
   }, [isMiniPanel]) // NUNCA se vuelve a ejecutar al seleccionar un álbum
@@ -378,6 +382,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   const shuffleQueueRef = useRef([])
   const playedInCycleRef = useRef(new Set())
   const shufflePlaylistRef = useRef(null)
+  const nextTrackRef = useRef(null)
+  const handleTrackEndRef = useRef(null)
 
   // Web Audio API para análisis de espectro en tiempo real y ecualizador paramétrico de 10 bandas
   const audioContextRef = useRef(null)
@@ -633,6 +639,12 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
       if (ctx.state === 'suspended') {
         ctx.resume().catch(console.error)
+      }
+
+      ctx.onstatechange = () => {
+        if (ctx.state === 'suspended' && audioRef.current && !audioRef.current.paused) {
+          ctx.resume().catch(() => {})
+        }
       }
 
       return analyser
@@ -1079,6 +1091,11 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         .catch((err) => {
           if (err?.name !== 'AbortError') {
             console.error('Error reproduciendo audio:', err)
+            setTimeout(() => {
+              if (audioRef.current && audioRef.current.paused) {
+                nextTrackRef.current?.()
+              }
+            }, 300)
           }
         })
     }
@@ -1390,6 +1407,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [loop, nextTrack])
 
+  nextTrackRef.current = nextTrack
+  handleTrackEndRef.current = handleTrackEnd
+
   // Reproducir álbum completo
   const playAlbum = useCallback((album, startIndex) => {
     if (!album || !album.tracks || album.tracks.length === 0) return
@@ -1458,7 +1478,25 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
       }
     }
-    const onEnded = () => handleTrackEnd()
+    const onError = (e) => {
+      const err = audio.error
+      console.warn('[Audio Engine] Error en elemento <audio>:', err?.code, err?.message || e)
+      // MediaError: 1 = MEDIA_ERR_ABORTED, 2 = MEDIA_ERR_NETWORK, 3 = MEDIA_ERR_DECODE, 4 = MEDIA_ERR_SRC_NOT_SUPPORTED
+      if (err?.code === 1) {
+        // Carga abortada por cambio rápido de pista; ignorar porque la nueva ya está en proceso
+        return
+      }
+
+      // Para errores de decodificación, red o recurso no admitido (ej. archivo bloqueado o corrupto):
+      // Avanzar automáticamente a la siguiente pista tras un breve intervalo para no congelar la reproducción
+      console.warn('[Audio Engine] Fallo crítico en pista actual. Avanzando automáticamente a la siguiente pista...')
+      setTimeout(() => {
+        if (audioRef.current && (audioRef.current.error || audioRef.current.paused)) {
+          nextTrackRef.current?.()
+        }
+      }, 250)
+    }
+    const onEnded = () => handleTrackEndRef.current?.()
     const onPlay = () => {
       setIsPlaying(true)
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
@@ -1482,6 +1520,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     audio.addEventListener('durationchange', onDurationChange)
     audio.addEventListener('loadedmetadata', onLoadedMetadata)
     audio.addEventListener('ended', onEnded)
+    audio.addEventListener('error', onError)
     audio.addEventListener('play', onPlay)
     audio.addEventListener('playing', onPlaying)
     audio.addEventListener('pause', onPause)
@@ -1491,6 +1530,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.removeEventListener('durationchange', onDurationChange)
       audio.removeEventListener('loadedmetadata', onLoadedMetadata)
       audio.removeEventListener('ended', onEnded)
+      audio.removeEventListener('error', onError)
       audio.removeEventListener('play', onPlay)
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPause)
@@ -2236,6 +2276,28 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [musicDirectory, currentTrack, selectedAlbum])
 
+  // Cambiar carátula de un álbum usando la imagen de una canción
+  const changeAlbumCover = useCallback(async (albumPath, trackPath, coverUrl) => {
+    if (!albumPath || !window.electronAPI?.changeAlbumCover) {
+      return { success: false, error: 'Ruta no válida o API no disponible' }
+    }
+    try {
+      const result = await window.electronAPI.changeAlbumCover({
+        albumPath,
+        trackPath,
+        coverUrl,
+        selectedDirectory: musicDirectory || undefined
+      })
+      if (result && result.success && Array.isArray(result.library)) {
+        setRawLibrary(result.library)
+      }
+      return result || { success: false }
+    } catch (err) {
+      console.error('Error al cambiar carátula del álbum:', err)
+      return { success: false, error: err.message }
+    }
+  }, [musicDirectory])
+
   // Editar información y etiquetas de una canción (Tag Editor ID3) en este y todos los demás álbumes donde exista
   const updateTrackTags = useCallback(async (track, newTags) => {
     if (!track?.path || !window.electronAPI?.updateTrackTags) {
@@ -2295,6 +2357,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,
+    changeAlbumCover,
     selectedAlbum,
     setSelectedAlbum,
     isLoading,
@@ -2317,6 +2380,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     moveAlbumFolder,
     renameAlbumFolder,
     deleteAlbumFolder,
+    changeAlbumCover,
     selectedAlbum,
     isLoading,
     musicDirectory,

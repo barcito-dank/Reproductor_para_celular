@@ -1,15 +1,29 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu, clipboard } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu, clipboard, powerSaveBlocker } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { spawn } from 'child_process'
 import { parseFile } from 'music-metadata'
 import NodeID3 from 'node-id3'
+import { pathToFileURL, fileURLToPath } from 'url'
 import { scanMusicDirectory, removeFromMetadataCache } from './scanner'
 import { registerHotkeys, unregisterHotkeys, getHotkeysConfig, updateHotkey, resetHotkeys } from './hotkeys'
 import { discordRpc } from './discordRpc'
 import { runHardlinksHealthCheck, repairHardlinksIntegrity } from './hardlinksHealth'
 import { downloadTrackMetadataAndLyrics, saveTrackLrcFile, deleteTrackLrcFile } from './lyricsDownloader'
+import { Logger } from './services/Logger'
+import { SecurityService } from './services/SecurityService'
+import { PowerManager } from './services/PowerManager'
+import { TrayManager } from './services/TrayManager'
+import { FileSystemService } from './services/FileSystemService'
+
+// Registro global de errores no capturados (Logging centralizado en producción)
+process.on('uncaughtException', (err) => {
+  Logger.error('UNCAUGHT_EXCEPTION', err?.message || 'Error no capturado', err)
+})
+process.on('unhandledRejection', (reason) => {
+  Logger.error('UNHANDLED_REJECTION', reason instanceof Error ? reason.message : String(reason), reason)
+})
 
 let mainWindow = null
 let sidePanel = null
@@ -40,11 +54,29 @@ let lastTrackId = null
 let lastPlayerState = null
 let lastPlaylist = []
 let lastCurrentTime = 0
+let powerSaveBlockerId = null
+
+/**
+ * Mantiene el proceso despierto en segundo plano sin suspenderse por inactividad del SO
+ * mientras la música se encuentra en reproducción activa.
+ */
+function syncPowerSaveBlocker(isPlaying) {
+  PowerManager.syncPowerSaveBlocker(isPlaying)
+}
 
 // Opciones de configuración de la barra lateral (modos estrictamente alternativos: Fija vs Ocultamiento Automático)
 let panelSettings = {
   pinned: false,    // "mantenerla siempre visible (fija)"
   autoHide: true    // "ocultar la barra lateral en caso de tocar otra cosa (blur)"
+}
+
+function toFileUrl(filePath) {
+  if (!filePath) return null
+  try {
+    return pathToFileURL(filePath).href
+  } catch (_) {
+    return null
+  }
 }
 
 function resolveExclusivePanelSettings(incoming, current = panelSettings) {
@@ -104,90 +136,42 @@ function getAppIconPath() {
 }
 
 function createTray() {
-  if (tray) return
   const iconPath = getAppIconPath() || path.join(__dirname, '../../resources/icon.ico')
-  if (!iconPath || !fs.existsSync(iconPath)) return
-
-  try {
-    tray = new Tray(iconPath)
-    updateTrayMenu()
-    tray.setToolTip('Reproductor de Música')
-
-    tray.on('click', () => {
+  TrayManager.init(iconPath, {
+    onTogglePlay: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('player-command', 'toggle-play')
+      }
+    },
+    onNext: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('player-command', 'next')
+      }
+    },
+    onPrevious: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('player-command', 'previous')
+      }
+    },
+    onRestore: () => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       if (mainWindow.isVisible()) {
-        if (mainWindow.isMinimized()) {
-          mainWindow.restore()
-        }
+        if (mainWindow.isMinimized()) mainWindow.restore()
         mainWindow.focus()
       } else {
         mainWindow.show()
         mainWindow.focus()
       }
-    })
-  } catch (err) {
-    console.warn('No se pudo inicializar la bandeja del sistema (Tray):', err.message)
-  }
+    },
+    onQuit: () => {
+      app.isQuitting = true
+      app.quit()
+    }
+  })
 }
 
 function updateTrayMenu() {
-  if (!tray || tray.isDestroyed()) return
-  const isPlaying = lastPlayerState?.isPlaying ?? false
-  const trackTitle = lastPlayerState?.currentTrack?.title
-    ? `${lastPlayerState.currentTrack.title} — ${lastPlayerState.currentTrack.artist || 'Artista'}`
-    : 'Reproductor de Música'
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: trackTitle.length > 36 ? trackTitle.slice(0, 36) + '…' : trackTitle,
-      enabled: false
-    },
-    { type: 'separator' },
-    {
-      label: isPlaying ? '⏸ Pausar' : '▶ Reproducir',
-      click: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('player-command', 'toggle-play')
-        }
-      }
-    },
-    {
-      label: '⏭ Siguiente',
-      click: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('player-command', 'next')
-        }
-      }
-    },
-    {
-      label: '⏮ Anterior',
-      click: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('player-command', 'previous')
-        }
-      }
-    },
-    { type: 'separator' },
-    {
-      label: 'Mostrar reproductor',
-      click: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isMinimized()) mainWindow.restore()
-          mainWindow.show()
-          mainWindow.focus()
-        }
-      }
-    },
-    {
-      label: 'Salir',
-      click: () => {
-        app.isQuitting = true
-        app.quit()
-      }
-    }
-  ])
-
-  tray.setContextMenu(contextMenu)
+  TrayManager.updateMenu(lastPlayerState)
 }
 
 function setupMusicDirectoryWatcher(dir) {
@@ -222,34 +206,10 @@ function setupMusicDirectoryWatcher(dir) {
   }
 }
 
-let isMainWindowReadyToShow = false
-let isRendererHydrated = false
-let mainWindowRevealTimer = null
-
-function revealMainWindowIfReady(force = false) {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (mainWindow.isVisible()) return
-  if (!isMainWindowReadyToShow && !force) return
-  if (!isRendererHydrated && !force) return
-
-  if (mainWindowRevealTimer) {
-    clearTimeout(mainWindowRevealTimer)
-    mainWindowRevealTimer = null
-  }
-  mainWindow.show()
-}
-
 function createMainWindow() {
   const { width: workWidth, height: workHeight } = screen.getPrimaryDisplay().workAreaSize
   const initialWidth = Math.max(960, Math.min(1200, Math.round(workWidth * 0.84)))
   const initialHeight = Math.max(680, Math.min(880, Math.round(workHeight * 0.9)))
-
-  isMainWindowReadyToShow = false
-  isRendererHydrated = false
-  if (mainWindowRevealTimer) {
-    clearTimeout(mainWindowRevealTimer)
-    mainWindowRevealTimer = null
-  }
 
   mainWindow = new BrowserWindow({
     width: initialWidth,
@@ -269,20 +229,23 @@ function createMainWindow() {
     }
   })
 
-  // Coordinar ready-to-show con la hidratación inicial de React (o fallback de 220ms en escaneos en frío)
+  // Mostrar la ventana suavemente únicamente cuando el DOM y el CSS inicial estén completamente listos
   mainWindow.once('ready-to-show', () => {
-    isMainWindowReadyToShow = true
-    if (isRendererHydrated) {
-      revealMainWindowIfReady(true)
-    } else {
-      mainWindowRevealTimer = setTimeout(() => {
-        revealMainWindowIfReady(true)
-      }, 220)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show()
     }
   })
 
   mainWindow.webContents.on('console-message', (_, level, message) => {
-    console.log(`[Renderer] ${message}`)
+    Logger.info('Renderer', message)
+  })
+
+  mainWindow.webContents.on('did-fail-load', (_, errorCode, errorDescription, validatedURL) => {
+    Logger.error('Renderer', `Fallo al cargar URL ${validatedURL}: [${errorCode}] ${errorDescription}`)
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_, details) => {
+    Logger.error('Renderer', `Proceso renderer terminado de forma anómala: ${details.reason}`)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
@@ -411,6 +374,7 @@ function createSidePanel() {
     ...initialBounds,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     resizable: false,
     movable: false,
     hasShadow: false,
@@ -438,10 +402,8 @@ function createSidePanel() {
   sidePanel.webContents.once('did-finish-load', () => {
     if (!sidePanel || sidePanel.isDestroyed()) return
     isSidePanelReady = true
-    // Pre-calentar superficie DirectComposition transparente sin robar foco (0% uso GPU en reposo)
     sidePanel.setAlwaysOnTop(true, 'screen-saver', 2)
     sidePanel.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    sidePanel.showInactive()
 
     if (pendingSidePanelMode) {
       const targetMode = pendingSidePanelMode
@@ -449,6 +411,9 @@ function createSidePanel() {
       setSidePanelBounds(targetMode)
     } else {
       broadcastSidePanelMode(sidePanelMode)
+      if (sidePanelMode !== 'hidden') {
+        sidePanel.showInactive()
+      }
     }
   })
 
@@ -490,6 +455,7 @@ function createNotificationWindow() {
     y: dispY + 16,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     resizable: false,
     hasShadow: false,
     alwaysOnTop: true,
@@ -552,6 +518,7 @@ function createOverlayWindow() {
     y: dispY + 28,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     alwaysOnTop: true,
     resizable: false,
     skipTaskbar: true,
@@ -1005,22 +972,7 @@ async function findRealMusicFilesByInode(targetIno, fallbackFileName) {
 }
 
 async function unlinkWithRetry(targetPath, maxRetries = 3, delayMs = 80) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await fs.promises.unlink(targetPath)
-      return { success: true }
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        return { success: true }
-      }
-      if (attempt < maxRetries && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES')) {
-        await new Promise((r) => setTimeout(r, delayMs * attempt))
-      } else {
-        return { success: false, error: err.message }
-      }
-    }
-  }
-  return { success: false, error: 'No se pudo eliminar el archivo' }
+  return await FileSystemService.unlinkWithRetry(targetPath, maxRetries, delayMs)
 }
 
 /**
@@ -1030,60 +982,8 @@ async function unlinkWithRetry(targetPath, maxRetries = 3, delayMs = 80) {
  * elimina el archivo maestro en Canciones_reales.
  */
 async function unlinkHardLinkAndCleanupMaster(filePath, { forceDeleteMaster = false } = {}) {
-  const normalizedPath = path.normalize(filePath)
-  let targetIno = 0n
-  let nlinkBefore = 1
-  const fileName = path.basename(normalizedPath)
-
-  try {
-    const st = await fs.promises.stat(normalizedPath, { bigint: true })
-    targetIno = st.ino || 0n
-    nlinkBefore = Number(st.nlink || 1)
-  } catch (err) {
-    return { success: false, error: 'El enlace o archivo ya no existe en el disco' }
-  }
-
-  // 1. Eliminar exclusivamente el enlace en canciones_organizadas con reintentos para bloqueos transitorios en Windows
-  const unlinkRes = await unlinkWithRetry(normalizedPath)
-  if (!unlinkRes.success) {
-    return { success: false, error: unlinkRes.error || 'No se pudo eliminar el enlace duro' }
-  }
-
-  removeFromMetadataCache(normalizedPath)
-  removeFromMetadataCache(filePath)
-
-  // 2. Si era el último enlace en canciones_organizadas (nlinkBefore <= 2: 1 en canciones_organizadas + 1 en Canciones_reales)
-  // o si se solicitó eliminar de todos lados (forceDeleteMaster), verificar y borrar el original en Canciones_reales
-  let masterDeleted = false
-  const deletedMasterPaths = []
-
-  if (nlinkBefore <= 2 || forceDeleteMaster) {
-    try {
-      const realMatches = await findRealMusicFilesByInode(targetIno, fileName)
-      for (const match of realMatches) {
-        // Solo borrar en Canciones_reales si ya no le queda ningún otro enlace en canciones_organizadas (nlink <= 1) o forceDeleteMaster
-        if (match.nlink <= 1 || forceDeleteMaster) {
-          const masterUnlinkRes = await unlinkWithRetry(match.path)
-          if (masterUnlinkRes.success) {
-            removeFromMetadataCache(match.path)
-            masterDeleted = true
-            deletedMasterPaths.push(match.path)
-            console.log(`[HardLink] Último enlace eliminado -> Archivo maestro eliminado en Canciones_reales: ${match.path}`)
-          } else {
-            console.warn(`[HardLink] No se pudo eliminar el archivo maestro en ${match.path}:`, masterUnlinkRes.error)
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[HardLink] Error verificando archivo maestro en Canciones_reales:', err.message)
-    }
-  }
-
-  return {
-    success: true,
-    masterDeleted,
-    deletedMasterPaths
-  }
+  const realMusicDir = await getRealMusicDirectory()
+  return await FileSystemService.unlinkHardLinkAndCleanupMaster(filePath, realMusicDir, { forceDeleteMaster })
 }
 
 /**
@@ -1237,6 +1137,15 @@ ipcMain.handle('delete-track-file', async (_, { filePath, forceDeleteMaster = fa
     return { success: false, error: 'Ruta de archivo inválida' }
   }
 
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+
+  if (!SecurityService.isPathInside(filePath, allowedRoots)) {
+    Logger.warn('Security', `Intento de eliminación fuera del directorio de música bloqueado: ${filePath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
+
   const res = await unlinkHardLinkAndCleanupMaster(filePath, { forceDeleteMaster: Boolean(forceDeleteMaster) })
   if (!res.success) {
     return { success: false, error: res.error || 'No se pudo eliminar el enlace de la pista' }
@@ -1250,7 +1159,6 @@ ipcMain.handle('delete-track-file', async (_, { filePath, forceDeleteMaster = fa
     }
   }
 
-  const musicDir = selectedDirectory || await getMusicDirectory()
   const userDataDir = app.getPath('userData')
   const library = await scanMusicDirectory(musicDir, userDataDir)
   return {
@@ -1575,21 +1483,19 @@ ipcMain.handle('get-track-lyrics', async (_, filePath) => {
 })
 
 ipcMain.handle('create-album', async (_, { albumName, parentDir, selectedDirectory }) => {
-  if (!albumName || typeof albumName !== 'string') {
-    return { success: false, error: 'Nombre de álbum inválido' }
-  }
-
-  const sanitized = albumName
-    .replace(/[<>:"/\\|?*]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  if (!sanitized || sanitized.startsWith('.')) {
+  const sanitized = SecurityService.sanitizeFileName(albumName)
+  if (!sanitized) {
     return { success: false, error: 'Ingresa un nombre válido para el álbum' }
   }
 
   const musicDir = selectedDirectory || await getMusicDirectory()
   const baseTarget = parentDir && typeof parentDir === 'string' && parentDir !== '__ROOT__' ? parentDir : musicDir
+
+  if (!SecurityService.isPathInside(baseTarget, [musicDir])) {
+    Logger.warn('Security', `Intento de creación de álbum fuera de ruta permitida: ${baseTarget}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
+
   const newAlbumPath = path.join(baseTarget, sanitized)
 
   try {
@@ -1615,21 +1521,19 @@ ipcMain.handle('create-album', async (_, { albumName, parentDir, selectedDirecto
 })
 
 ipcMain.handle('create-folder', async (_, { folderName, parentDir, selectedDirectory }) => {
-  if (!folderName || typeof folderName !== 'string') {
-    return { success: false, error: 'Nombre de carpeta inválido' }
-  }
-
-  const sanitized = folderName
-    .replace(/[<>:"/\\|?*]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  if (!sanitized || sanitized.startsWith('.')) {
+  const sanitized = SecurityService.sanitizeFileName(folderName)
+  if (!sanitized) {
     return { success: false, error: 'Ingresa un nombre válido para la carpeta padre' }
   }
 
   const musicDir = selectedDirectory || await getMusicDirectory()
   const baseTarget = parentDir && typeof parentDir === 'string' && parentDir !== '__ROOT__' ? parentDir : musicDir
+
+  if (!SecurityService.isPathInside(baseTarget, [musicDir])) {
+    Logger.warn('Security', `Intento de creación de carpeta fuera de ruta permitida: ${baseTarget}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
+
   const newFolderPath = path.join(baseTarget, sanitized)
 
   try {
@@ -1667,6 +1571,11 @@ ipcMain.handle('move-album-folder', async (_, { sourcePath, targetParentDir, sel
       ? musicDir
       : targetParentDir
 
+  if (!SecurityService.isPathInside(sourcePath, [musicDir]) || !SecurityService.isPathInside(destParent, [musicDir])) {
+    Logger.warn('Security', `Intento de mover carpeta fuera del directorio de música: ${sourcePath} -> ${destParent}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
+
   const resolvedSource = path.resolve(sourcePath)
   const resolvedDestParent = path.resolve(destParent)
   const folderName = path.basename(resolvedSource)
@@ -1695,7 +1604,7 @@ ipcMain.handle('move-album-folder', async (_, { sourcePath, targetParentDir, sel
     await fs.promises.mkdir(resolvedDestParent, { recursive: true })
     await moveDirectoryPreservingHardLinks(resolvedSource, resolvedDest)
   } catch (err) {
-    console.error('Error moviendo carpeta de álbum:', err.message)
+    Logger.error('FileSystem', `Error moviendo carpeta de álbum: ${err.message}`)
     return { success: false, error: err.message || 'No se pudo mover el álbum' }
   }
 
@@ -1715,12 +1624,16 @@ ipcMain.handle('rename-album-folder', async (_, { albumPath, newName, selectedDi
     return { success: false, error: 'Ruta de álbum inválida' }
   }
 
-  const sanitized = (newName || '').replace(/[\\/:*?"<>|]/g, '').trim()
+  const sanitized = SecurityService.sanitizeFileName(newName)
   if (!sanitized) {
     return { success: false, error: 'El nombre del álbum no puede estar vacío ni contener caracteres especiales' }
   }
 
   const musicDir = selectedDirectory || await getMusicDirectory()
+  if (!SecurityService.isPathInside(albumPath, [musicDir])) {
+    Logger.warn('Security', `Intento de renombrar fuera del directorio de música: ${albumPath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
   const resolvedPath = path.resolve(albumPath)
   const currentBaseName = path.basename(resolvedPath)
 
@@ -1808,6 +1721,43 @@ ipcMain.handle('delete-album-folder', async (_, { albumPath, selectedDirectory }
   }
 })
 
+ipcMain.handle('change-album-cover', async (_, { albumPath, trackPath, coverUrl, selectedDirectory }) => {
+  if (!albumPath || typeof albumPath !== 'string') {
+    return { success: false, error: 'Ruta de álbum no válida' }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+
+  if (!SecurityService.isPathInside(albumPath, [musicDir])) {
+    Logger.warn('Security', `Intento de cambiar portada fuera del directorio de música: ${albumPath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
+
+  if (trackPath && !SecurityService.isPathInside(trackPath, allowedRoots)) {
+    Logger.warn('Security', `Intento de acceso a pista de audio fuera de rutas permitidas: ${trackPath}`)
+    return { success: false, error: 'Acceso no permitido a la pista de audio' }
+  }
+
+  const coverRes = await FileSystemService.applyAlbumCover(albumPath, trackPath, coverUrl)
+  if (!coverRes.success) {
+    return { success: false, error: coverRes.error || 'No se pudo aplicar la portada del álbum' }
+  }
+
+  // Re-escanear biblioteca para reflejar el cambio en disco
+  const userDataDir = app.getPath('userData')
+  const library = await scanMusicDirectory(musicDir, userDataDir)
+
+  return {
+    success: true,
+    albumPath,
+    targetFilePath: coverRes.targetFilePath,
+    coverUrl: toFileUrl(coverRes.targetFilePath),
+    library
+  }
+})
+
 ipcMain.on('window-minimize', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   // Desplegar el panel lateral ANTES de iniciar la animación de minimizado de Windows
@@ -1831,8 +1781,9 @@ ipcMain.on('window-minimize', () => {
 })
 
 ipcMain.on('renderer-ready', () => {
-  isRendererHydrated = true
-  revealMainWindowIfReady()
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+    mainWindow.show()
+  }
 })
 
 ipcMain.on('window-maximize', () => {
@@ -1911,6 +1862,9 @@ ipcMain.on('player-state-update', (event, state) => {
   // Actualizar Discord Rich Presence
   if (state && (state.currentTrack !== undefined || state.isPlaying !== undefined)) {
     discordRpc.updateTrack(state.currentTrack, state.isPlaying, lastCurrentTime)
+    if (typeof state.isPlaying === 'boolean') {
+      syncPowerSaveBlocker(state.isPlaying)
+    }
   }
 
   updateTrayMenu()
@@ -2161,15 +2115,18 @@ ipcMain.handle('get-game-overlay-status', () => {
   return Boolean(isGameOverlayEnabled && overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible())
 })
 
+// Bloqueo estricto de las teclas F1 y F2 en todas las ventanas para evitar menús de ayuda o eventos del navegador
+app.on('web-contents-created', (_, contents) => {
+  contents.on('before-input-event', (event, input) => {
+    if (input.key === 'F1' || input.key === 'F2') {
+      event.preventDefault()
+    }
+  })
+})
+
 app.whenReady().then(() => {
-  // Elevar prioridad del proceso a nivel Superior (Above Normal)
-  // para que nunca sufra stutter o congelamientos mientras se juega (ej. League of Legends)
-  try {
-    os.setPriority(os.constants.priority.PRIORITY_ABOVE_NORMAL)
-    console.log('[Gaming] Prioridad de proceso elevada a PRIORITY_ABOVE_NORMAL')
-  } catch (err) {
-    console.warn('[Gaming] No se pudo elevar la prioridad del proceso:', err.message)
-  }
+  Logger.init(app.getPath('userData'))
+  PowerManager.boostProcessPriority()
 
   createMainWindow()
   createSidePanel()
@@ -2247,10 +2204,7 @@ app.on('will-quit', () => {
     try { notificationWindow.destroy() } catch (_) {}
     notificationWindow = null
   }
-  if (tray && !tray.isDestroyed()) {
-    try { tray.destroy() } catch (_) {}
-    tray = null
-  }
+  TrayManager.destroy()
   if (edgeCheckTimeout) clearTimeout(edgeCheckTimeout)
   if (hideMarkerTimeout) clearTimeout(hideMarkerTimeout)
   if (minimizeDeferTimeout) clearTimeout(minimizeDeferTimeout)
@@ -2262,6 +2216,7 @@ app.on('will-quit', () => {
   notifTimeout = null
   notifHideTimeout = null
   unregisterHotkeys()
+  PowerManager.cleanup()
 })
 
 app.on('window-all-closed', () => {

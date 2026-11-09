@@ -939,6 +939,235 @@ function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
   return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : null
 }
 
+function ChangeAlbumCoverModal({ album, onClose, onSave }) {
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedTrack, setSelectedTrack] = useState(null)
+  const [isSaving, setIsSaving] = useState(false)
+  const [errorMsg, setErrorMsg] = useState(null)
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !isSaving) {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isSaving, onClose])
+
+  const filteredTracks = useMemo(() => {
+    const tracks = album?.tracks || []
+    if (!searchQuery.trim()) return tracks
+    const q = searchQuery.trim().toLowerCase()
+    return tracks.filter((t) => {
+      const title = (t.title || '').toLowerCase()
+      const artist = (t.artist || '').toLowerCase()
+      return title.includes(q) || artist.includes(q)
+    })
+  }, [album?.tracks, searchQuery])
+
+  const handleApply = async (track) => {
+    const target = track || selectedTrack
+    if (!target || isSaving) return
+    setIsSaving(true)
+    setErrorMsg(null)
+    try {
+      const res = await onSave(album.path, target.path, target.cover)
+      if (res && res.success) {
+        onClose()
+      } else {
+        setErrorMsg(res?.error || 'No se pudo actualizar la portada del álbum')
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Error inesperado al aplicar la portada')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const modalContent = (
+    <div className="track-modal-backdrop" onClick={() => !isSaving && onClose()}>
+      <div
+        className="track-modal-card album-cover-picker-card"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-label="Cambiar foto del álbum"
+      >
+        {/* Cabecera del Modal */}
+        <div className="track-modal-header album-cover-picker-header">
+          <div className="track-modal-title-group">
+            <div className="album-cover-picker-icon-badge">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+              </svg>
+            </div>
+            <div>
+              <h3>Cambiar foto del álbum</h3>
+              <p className="track-modal-subtitle">
+                Selecciona una canción para usar su foto como portada de <strong>{album.name}</strong>
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="track-modal-close"
+            onClick={onClose}
+            disabled={isSaving}
+            title="Cerrar (Esc)"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Barra de Búsqueda y Filtro */}
+        <div className="album-cover-picker-toolbar">
+          <div className="album-cover-picker-search-box">
+            <svg className="album-filter-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+            </svg>
+            <input
+              type="text"
+              className="album-cover-picker-input"
+              placeholder="Buscar por título o artista..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              autoFocus
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                className="album-filter-clear"
+                onClick={() => setSearchQuery('')}
+                title="Limpiar búsqueda"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <span className="album-cover-picker-count-badge">
+            {filteredTracks.length} {filteredTracks.length === 1 ? 'canción' : 'canciones'}
+          </span>
+        </div>
+
+        {/* Mensaje de error si falla la operación */}
+        {errorMsg && (
+          <div className="album-cover-picker-error">
+            ⚠️ {errorMsg}
+          </div>
+        )}
+
+        {/* Galería / Rejilla de Recuadros */}
+        <div className="album-cover-picker-grid-container">
+          {filteredTracks.length === 0 ? (
+            <div className="album-cover-picker-empty">
+              <span className="album-cover-picker-empty-icon">🔍</span>
+              <h4>No se encontraron canciones</h4>
+              <p>Prueba con otros términos de búsqueda para encontrar la canción deseada.</p>
+            </div>
+          ) : (
+            <div className="album-cover-picker-grid">
+              {filteredTracks.map((t, idx) => {
+                const isSelected = selectedTrack && (selectedTrack.uniqueKey ? selectedTrack.uniqueKey === t.uniqueKey : selectedTrack.path === t.path)
+                const isCurrent = album.cover && t.cover && album.cover.split('?')[0] === t.cover.split('?')[0]
+
+                return (
+                  <div
+                    key={t.uniqueKey || t.path || idx}
+                    className={`album-cover-grid-card ${isSelected ? 'selected' : ''} ${isCurrent ? 'is-current' : ''}`}
+                    onClick={() => setSelectedTrack(t)}
+                    onDoubleClick={() => handleApply(t)}
+                    title={`Clic para seleccionar · Doble clic para aplicar\n${t.title} - ${t.artist || 'Artista Desconocido'}`}
+                  >
+                    <div className="album-cover-card-art">
+                      {t.cover ? (
+                        <img
+                          src={t.cover}
+                          alt={t.title}
+                          className="album-cover-card-img"
+                          loading="lazy"
+                          decoding="async"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none'
+                            const ph = e.currentTarget.parentElement?.querySelector('.album-cover-card-ph')
+                            if (ph) ph.style.display = 'flex'
+                          }}
+                        />
+                      ) : null}
+                      <div
+                        className="album-cover-card-ph"
+                        style={{ display: t.cover ? 'none' : 'flex' }}
+                      >
+                        💿
+                      </div>
+
+                      {isCurrent && (
+                        <span className="album-cover-current-chip">
+                          Actual
+                        </span>
+                      )}
+
+                      {isSelected && (
+                        <div className="album-cover-check-bubble">
+                          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="album-cover-card-details">
+                      <span className="album-cover-card-title" title={t.title}>
+                        {t.title || 'Sin título'}
+                      </span>
+                      <span className="album-cover-card-artist" title={t.artist}>
+                        {t.artist || 'Artista Desconocido'}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Pie del Modal */}
+        <div className="track-modal-footer album-cover-picker-footer">
+          <div className="album-cover-picker-hint">
+            {selectedTrack ? (
+              <span>
+                Seleccionada: <strong>{selectedTrack.title}</strong> ({selectedTrack.artist || 'Artista Desconocido'})
+              </span>
+            ) : (
+              <span className="hint-muted">Haz clic en un recuadro para seleccionar una foto</span>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
+            <button
+              type="button"
+              className="track-modal-btn secondary"
+              onClick={onClose}
+              disabled={isSaving}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className="track-modal-btn primary"
+              onClick={() => handleApply(selectedTrack)}
+              disabled={isSaving || !selectedTrack}
+            >
+              {isSaving ? 'Aplicando...' : 'Aplicar como portada'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+
+  return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : null
+}
+
 function AlbumView() {
   const {
     selectedAlbum,
@@ -949,6 +1178,7 @@ function AlbumView() {
     deleteTrackFromDisk,
     deleteTrackFromAllAlbums,
     updateTrackTags,
+    changeAlbumCover,
     playAlbum,
     playTrack,
     currentTrack,
@@ -968,6 +1198,7 @@ function AlbumView() {
   const [albumPickerState, setAlbumPickerState] = useState(null) // { track, position }
   const [contextMenuState, setContextMenuState] = useState(null) // { track, position }
   const [propertiesTrack, setPropertiesTrack] = useState(null)
+  const [isChangeCoverOpen, setIsChangeCoverOpen] = useState(false)
   const [deleteTargetTrack, setDeleteTargetTrack] = useState(null)
   const [isDeletingTrack, setIsDeletingTrack] = useState(false)
   const [feedbackBanner, setFeedbackBanner] = useState(null)
@@ -1403,12 +1634,28 @@ function AlbumView() {
   }, [allAlbums, getTrackAlbumInfo, handleAddTrackToSingleAlbum, handleSelectTrack, showFeedback])
 
   // Si está cargando o la biblioteca ya existe pero aún se está resolviendo atómicamente el álbum inicial,
-  // mantener la vista de carga para evitar el parpadeo (FOUC) de "Bienvenido a tu Música"
+  // mostrar skeleton de estructura idéntica para evitar saltos o parpadeos de interfaz
   if (isLoading || (!selectedAlbum && library.length > 0)) {
     return (
-      <div className="loading-view">
-        <div className="spinner" />
-        <p style={{ color: 'var(--text-dim)' }}>Cargando biblioteca y carátulas...</p>
+      <div className="album-skeleton-container">
+        <div className="album-skeleton-header">
+          <div className="skeleton-pulse album-skeleton-cover" />
+          <div className="album-skeleton-meta">
+            <div className="skeleton-pulse album-skeleton-badge" />
+            <div className="skeleton-pulse album-skeleton-title" />
+            <div className="skeleton-pulse album-skeleton-sub" />
+          </div>
+        </div>
+        <div className="album-skeleton-tracklist">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="album-skeleton-row">
+              <div className="skeleton-pulse album-skeleton-track-num" />
+              <div className="skeleton-pulse album-skeleton-track-thumb" />
+              <div className="skeleton-pulse album-skeleton-track-title" />
+              <div className="skeleton-pulse album-skeleton-track-dur" />
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
@@ -1464,7 +1711,20 @@ function AlbumView() {
 
         <div className="album-info">
           <div className="album-info-label">
-            {album.categoryPath ? `Álbum · ${album.categoryPath}` : 'Álbum'}
+            <span>{album.categoryPath ? `Álbum · ${album.categoryPath}` : 'Álbum'}</span>
+            {!album.isAllTracks && (
+              <button
+                type="button"
+                className="album-cover-settings-btn"
+                onClick={() => setIsChangeCoverOpen(true)}
+                title="Cambiar foto del álbum"
+                aria-label="Cambiar foto del álbum"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                  <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+                </svg>
+              </button>
+            )}
           </div>
           <h1>{album.name}</h1>
           <div className="album-info-meta">
@@ -1701,6 +1961,21 @@ function AlbumView() {
           onCancel={() => setDeleteTargetTrack(null)}
           onConfirm={handleConfirmDeleteTrack}
           isDeleting={isDeletingTrack}
+        />
+      )}
+
+      {/* Modal para cambiar la portada del álbum desde sus canciones */}
+      {isChangeCoverOpen && selectedAlbum && (
+        <ChangeAlbumCoverModal
+          album={selectedAlbum}
+          onClose={() => setIsChangeCoverOpen(false)}
+          onSave={async (albumPath, trackPath, coverUrl) => {
+            const res = await changeAlbumCover(albumPath, trackPath, coverUrl)
+            if (res && res.success) {
+              showFeedback('Portada del álbum actualizada')
+            }
+            return res
+          }}
         />
       )}
 

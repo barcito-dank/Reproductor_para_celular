@@ -32,6 +32,8 @@ export const SECONDARY_HOTKEYS = {
   volumeDown: ['Ctrl+Alt+Down', 'Ctrl+Shift+Down', 'VolumeDown']
 }
 
+export const BLOCKED_KEYS = ['F1', 'F2']
+
 export const HOTKEY_METADATA = {
   restoreMainWindow: {
     category: 'window',
@@ -142,6 +144,9 @@ export function updateHotkey(action, accelerator, actions = activeActionsRef) {
   }
 
   const trimmed = accelerator.trim()
+  if (BLOCKED_KEYS.includes(trimmed.toUpperCase())) {
+    return { success: false, error: 'Las teclas F1 y F2 están bloqueadas' }
+  }
   customHotkeys[action] = trimmed
   saveHotkeys(customHotkeys)
 
@@ -197,6 +202,18 @@ export function registerHotkeys(actions) {
       }
     }
   }
+  // Bloqueo explícito de teclas del sistema (F1 y F2) a nivel global
+  for (const blockedKey of BLOCKED_KEYS) {
+    try {
+      const success = globalShortcut.register(blockedKey, () => {
+        // Evento capturado y neutralizado para que Windows ni otras aplicaciones lo procesen
+      })
+      if (success) {
+        registeredShortcuts.push(blockedKey)
+      }
+    } catch (_) {}
+  }
+
   console.log(`[Hotkeys] ${registeredShortcuts.length} atajos globales activos.`)
 }
 

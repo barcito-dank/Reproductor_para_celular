@@ -67,6 +67,12 @@ export default function SettingsModal({ isOpen, onClose, theme, onThemeChange, o
       else if (keyName === 'ArrowRight') keyName = 'Right'
       else if (keyName.length === 1) keyName = keyName.toUpperCase()
 
+      if (keyName === 'F1' || keyName === 'F2') {
+        setHotkeyFeedback({ error: 'Las teclas F1 y F2 están bloqueadas por el sistema' })
+        setTimeout(() => setHotkeyFeedback(null), 2500)
+        return
+      }
+
       const isSpecialSingle = /^F\d{1,2}$/i.test(keyName) || /^Media/i.test(keyName)
       if (parts.length === 0 && !isSpecialSingle) {
         setHotkeyFeedback({ error: 'Usa al menos un modificador (Ctrl, Alt o Shift) + tecla' })
