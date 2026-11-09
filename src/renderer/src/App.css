@@ -53,20 +53,29 @@
   box-sizing: border-box;
 }
 
-body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+:root, html, body, #root {
+  width: 100%;
+  height: 100%;
+  background-color: var(--bg-primary);
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
   user-select: none;
 }
 
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
 :root[data-window-mode='mini'],
 :root[data-window-mode='mini'] body,
+:root[data-window-mode='mini'] #root,
 :root[data-window-mode='notification'],
 :root[data-window-mode='notification'] body,
+:root[data-window-mode='notification'] #root,
 :root[data-window-mode='overlay'],
-:root[data-window-mode='overlay'] body {
+:root[data-window-mode='overlay'] body,
+:root[data-window-mode='overlay'] #root {
   background: transparent !important;
   background-color: transparent !important;
 }
@@ -240,6 +249,31 @@ body {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  animation: appSmoothFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app.window-restored {
+  animation: appRestoreFade 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes appSmoothFadeIn {
+  from {
+    opacity: 0.88;
+    transform: scale(0.998);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes appRestoreFade {
+  from {
+    opacity: 0.92;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .app-content {
@@ -302,7 +336,10 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px 8px 28px;
+  will-change: scroll-position;
+  contain: layout style paint;
 }
 
 .album-item {
@@ -312,10 +349,11 @@ body {
   padding: 8px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: var(--transition);
+  transition: background 0.15s ease, border-color 0.15s ease;
   margin-bottom: 2px;
   content-visibility: auto;
   contain-intrinsic-size: 0 54px;
+  contain: layout paint;
 }
 
 .album-item:hover {
@@ -385,14 +423,14 @@ body {
   border-radius: var(--radius-md);
   cursor: pointer;
   user-select: none;
-  transition: all var(--transition);
+  transition: background 0.15s ease, border-color 0.15s ease;
   margin-bottom: 3px;
+  contain: layout paint;
 }
 
 .folder-header-bar:hover {
   background: var(--bg-hover);
   border-color: rgba(124, 92, 252, 0.4);
-  transform: translateX(2px);
 }
 
 .folder-header-left {
@@ -505,6 +543,8 @@ body {
   overflow-x: hidden;
   margin-right: 3px;
   padding: 0;
+  will-change: scroll-position;
+  contain: layout style paint;
 }
 
 .ambient-backdrop-glow {
@@ -888,16 +928,18 @@ body {
   padding: 8px 14px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
   font-variant-numeric: tabular-nums;
   margin-bottom: 3px;
   position: relative;
   box-sizing: border-box;
+  contain: layout paint;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 60px;
 }
 
 .track-item:hover {
   background: var(--bg-hover);
-  transform: translateX(3px);
 }
 
 .track-item.active {

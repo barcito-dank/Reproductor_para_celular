@@ -168,7 +168,6 @@ const TreeNode = React.memo(function TreeNode({
             src={node.cover}
             alt={node.name}
             className="album-item-cover"
-            loading="lazy"
             decoding="async"
             draggable={false}
             onError={(e) => {
@@ -177,10 +176,14 @@ const TreeNode = React.memo(function TreeNode({
               if (fb) fb.style.display = 'flex'
             }}
           />
-          <div className="album-item-cover-placeholder" style={{ display: 'none' }}>{isAllTracks ? '✨' : '💿'}</div>
+          <div className="album-item-cover-placeholder" style={{ display: 'none' }}>
+            {isAllTracks ? '✨' : '💿'}
+          </div>
         </React.Fragment>
       ) : (
-        <div className="album-item-cover-placeholder">{isAllTracks ? '✨' : '💿'}</div>
+        <div className="album-item-cover-placeholder">
+          {isAllTracks ? '✨' : '💿'}
+        </div>
       )}
       <div className="album-item-info">
         <div className="album-item-name">

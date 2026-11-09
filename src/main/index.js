@@ -1,7 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, Tray, Menu, clipboard, powerSaveBlocker } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, screen, globalShortcut, shell, clipboard } from 'electron'
 import path from 'path'
 import fs from 'fs'
-import os from 'os'
 import { spawn } from 'child_process'
 import { parseFile } from 'music-metadata'
 import NodeID3 from 'node-id3'
@@ -16,6 +15,7 @@ import { SecurityService } from './services/SecurityService'
 import { PowerManager } from './services/PowerManager'
 import { TrayManager } from './services/TrayManager'
 import { FileSystemService } from './services/FileSystemService'
+import { parseLrcText } from '@shared/lyricsParser'
 
 // Registro global de errores no capturados (Logging centralizado en producción)
 process.on('uncaughtException', (err) => {
@@ -25,13 +25,18 @@ process.on('unhandledRejection', (reason) => {
   Logger.error('UNHANDLED_REJECTION', reason instanceof Error ? reason.message : String(reason), reason)
 })
 
+// Switches de Chromium críticos para blindar continuidad de audio y desactivar estrangulamiento de segundo plano
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
 let mainWindow = null
 let sidePanel = null
 let notificationWindow = null
 let overlayWindow = null
 let isOverlayLoaded = false
 let isGameOverlayEnabled = false
-let tray = null
 let dirWatcher = null
 let watcherDebounceTimer = null
 let sidePanelMode = 'hidden' // 'hidden' | 'marker' | 'expanded'
@@ -54,7 +59,6 @@ let lastTrackId = null
 let lastPlayerState = null
 let lastPlaylist = []
 let lastCurrentTime = 0
-let powerSaveBlockerId = null
 
 /**
  * Mantiene el proceso despierto en segundo plano sin suspenderse por inactividad del SO
@@ -158,9 +162,11 @@ function createTray() {
       if (mainWindow.isVisible()) {
         if (mainWindow.isMinimized()) mainWindow.restore()
         mainWindow.focus()
+        mainWindow.webContents.invalidate()
       } else {
         mainWindow.show()
         mainWindow.focus()
+        mainWindow.webContents.invalidate()
       }
     },
     onQuit: () => {
@@ -229,11 +235,34 @@ function createMainWindow() {
     }
   })
 
-  // Mostrar la ventana suavemente únicamente cuando el DOM y el CSS inicial estén completamente listos
+  // Revelar la ventana suavemente únicamente cuando el árbol React y la biblioteca estén completamente hidratados
+  let isWindowRevealed = false
+  const revealMainWindow = () => {
+    if (isWindowRevealed || !mainWindow || mainWindow.isDestroyed()) return
+    isWindowRevealed = true
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.webContents.invalidate()
+  }
+
+  ipcMain.once('renderer-ready', () => {
+    revealMainWindow()
+  })
+
+  // Salvaguarda: si por algún motivo la hidratación toma más de 2000ms, revelar para evitar quedar oculto
   mainWindow.once('ready-to-show', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
-    }
+    setTimeout(() => {
+      revealMainWindow()
+    }, 2000)
+  })
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    try {
+      const pid = mainWindow?.webContents?.getOSProcessId()
+      if (pid) {
+        PowerManager.boostRendererPriority(pid)
+      }
+    } catch (_) {}
   })
 
   mainWindow.webContents.on('console-message', (_, level, message) => {
@@ -270,6 +299,8 @@ function createMainWindow() {
   mainWindow.on('restore', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('main-window-visibility', true)
+      // Forzar invalidación inmediata del compositor GPU para eliminar el retraso de repintado de DWM
+      mainWindow.webContents.invalidate()
     }
     if (panelSettings.autoHide && !panelSettings.pinned) {
       setSidePanelBounds('collapsed')
@@ -279,6 +310,7 @@ function createMainWindow() {
   mainWindow.on('show', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('main-window-visibility', true)
+      mainWindow.webContents.invalidate()
     }
   })
 
@@ -305,10 +337,7 @@ function createMainWindow() {
       overlayWindow = null
       isOverlayLoaded = false
     }
-    if (tray && !tray.isDestroyed()) {
-      try { tray.destroy() } catch (_) {}
-      tray = null
-    }
+    TrayManager.destroy()
     app.quit()
   })
 }
@@ -913,64 +942,6 @@ async function getRealMusicDirectory() {
   return CONFIGURED_REAL_MUSIC_DIR
 }
 
-/**
- * Busca en Canciones_reales el archivo maestro que comparte el mismo inodo NTFS (stats.ino)
- * que el enlace duro en canciones_organizadas.
- */
-async function findRealMusicFilesByInode(targetIno, fallbackFileName) {
-  const realDir = await getRealMusicDirectory()
-  try {
-    await fs.promises.access(realDir)
-  } catch (_) {
-    return []
-  }
-
-  const matches = []
-  const resolvedRealDir = path.resolve(realDir).toLowerCase()
-
-  // 1. Vía rápida O(1): comprobar si existe con el mismo nombre de archivo directamente en Canciones_reales
-  if (fallbackFileName) {
-    const directCandidate = path.join(realDir, fallbackFileName)
-    try {
-      const st = await fs.promises.stat(directCandidate, { bigint: true })
-      if (st.isFile()) {
-        if (targetIno && targetIno > 0n && st.ino === targetIno) {
-          return [{ path: directCandidate, nlink: Number(st.nlink || 1) }]
-        }
-      }
-    } catch (_) {}
-  }
-
-  // 2. Búsqueda recursiva por inodo NTFS (por si el archivo fue renombrado o está en subcarpetas dentro de Canciones_reales)
-  if (!targetIno || targetIno <= 0n) return matches
-
-  async function walk(currentDir) {
-    let entries = []
-    try {
-      entries = await fs.promises.readdir(currentDir, { withFileTypes: true })
-    } catch (_) {
-      return
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue
-      const fullPath = path.join(currentDir, entry.name)
-      if (entry.isDirectory()) {
-        await walk(fullPath)
-      } else if (entry.isFile()) {
-        try {
-          const st = await fs.promises.stat(fullPath, { bigint: true })
-          if (st.ino === targetIno && path.resolve(fullPath).toLowerCase().startsWith(resolvedRealDir)) {
-            matches.push({ path: fullPath, nlink: Number(st.nlink || 1) })
-          }
-        } catch (_) {}
-      }
-    }
-  }
-
-  await walk(realDir)
-  return matches
-}
-
 async function unlinkWithRetry(targetPath, maxRetries = 3, delayMs = 80) {
   return await FileSystemService.unlinkWithRetry(targetPath, maxRetries, delayMs)
 }
@@ -1064,10 +1035,17 @@ ipcMain.handle('scan-music', async (_, selectedDirectory) => {
   }
 })
 
-ipcMain.on('show-item-in-folder', (_, filePath) => {
+ipcMain.on('show-item-in-folder', async (_, filePath) => {
   if (filePath && typeof filePath === 'string') {
     try {
-      shell.showItemInFolder(path.normalize(filePath))
+      const musicDir = await getMusicDirectory()
+      const realMusicDir = await getRealMusicDirectory()
+      const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+      if (SecurityService.isPathInside(filePath, allowedRoots)) {
+        shell.showItemInFolder(path.normalize(filePath))
+      } else {
+        Logger.warn('Security', `show-item-in-folder bloqueado fuera de raíces permitidas: ${filePath}`)
+      }
     } catch (err) {
       console.error('Error abriendo ubicación del archivo:', err.message)
     }
@@ -1077,6 +1055,15 @@ ipcMain.on('show-item-in-folder', (_, filePath) => {
 ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums, selectedDirectory }) => {
   if (!sourceTrackPath || !Array.isArray(targetAlbums) || targetAlbums.length === 0) {
     return { success: false, error: 'Parámetros inválidos' }
+  }
+
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+
+  if (!SecurityService.isPathInside(sourceTrackPath, allowedRoots)) {
+    Logger.warn('Security', `add-track-to-albums ruta origen rechazada: ${sourceTrackPath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
   }
 
   try {
@@ -1090,6 +1077,10 @@ ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums,
 
   for (const album of targetAlbums) {
     if (!album || !album.path) continue
+    if (!SecurityService.isPathInside(album.path, [musicDir])) {
+      Logger.warn('Security', `add-track-to-albums destino rechazado: ${album.path}`)
+      continue
+    }
     try {
       await fs.promises.mkdir(album.path, { recursive: true })
       const destPath = path.join(album.path, fileName)
@@ -1126,7 +1117,6 @@ ipcMain.handle('add-track-to-albums', async (_, { sourceTrackPath, targetAlbums,
     }
   }
 
-  const musicDir = selectedDirectory || await getMusicDirectory()
   const userDataDir = app.getPath('userData')
   const library = await scanMusicDirectory(musicDir, userDataDir)
   return { success: true, copiedAlbums, library }
@@ -1172,6 +1162,13 @@ ipcMain.handle('delete-track-file', async (_, { filePath, forceDeleteMaster = fa
 ipcMain.handle('get-track-properties', async (_, filePath) => {
   if (!filePath || typeof filePath !== 'string') return null
   try {
+    const musicDir = await getMusicDirectory()
+    const realMusicDir = await getRealMusicDirectory()
+    const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+    if (!SecurityService.isPathInside(filePath, allowedRoots)) {
+      Logger.warn('Security', `get-track-properties ruta rechazada: ${filePath}`)
+      return null
+    }
     const normalizedPath = path.normalize(filePath)
     const stats = await fs.promises.stat(normalizedPath)
     let metaCommon = {}
@@ -1222,6 +1219,10 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
     return { success: false, error: 'No se proporcionaron rutas de archivo válidas' }
   }
 
+  const musicDir = selectedDirectory || await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+
   let updatedCount = 0
   const writtenInodes = new Set()
   const validNormalizedPaths = []
@@ -1233,6 +1234,10 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
   for (const rawPath of targetPaths) {
     try {
       if (!fs.existsSync(rawPath)) continue
+      if (!SecurityService.isPathInside(rawPath, allowedRoots)) {
+        Logger.warn('Security', `update-track-tags ruta rechazada: ${rawPath}`)
+        continue
+      }
       const normalizedPath = path.normalize(rawPath)
       validNormalizedPaths.push(normalizedPath)
       const ext = path.extname(normalizedPath).toLowerCase()
@@ -1291,7 +1296,7 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
 
       // 2. Si no se encontró por coincidencia directa de inodo, buscar recursivamente por inodo NTFS en Canciones_reales
       if (!masterPath && currentIno && currentIno > 0n) {
-        const matches = await findRealMusicFilesByInode(currentIno, null)
+        const matches = await FileSystemService.findRealMusicFilesByInode(currentIno, '', realDir)
         if (matches && matches.length > 0) {
           masterPath = matches[0].path
           masterIno = currentIno
@@ -1353,70 +1358,21 @@ ipcMain.handle('update-track-tags', async (_, { filePath, filePaths, title, arti
   }
 })
 
-/**
- * Parsea el contenido en formato LRC (marcas de tiempo [mm:ss.xx]) o texto plano.
- * Retorna { synced: boolean, lines: Array<{ time: number, text: string }> }
- */
-function parseLrcText(content) {
-  if (!content || typeof content !== 'string') return { synced: false, lines: [] }
-  const cleanContent = content.replace(/^\uFEFF/, '')
-  const rawLines = cleanContent.split(/\r?\n/)
-  const parsedLines = []
-  const timeRegex = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g
-
-  let hasTimestamp = false
-
-  for (const rawLine of rawLines) {
-    const line = rawLine.trim()
-    if (!line) continue
-
-    // Ignorar etiquetas de metadata como [ti:], [ar:], [al:], etc.
-    if (/^\[(ti|ar|al|by|offset|length|re|ve):/i.test(line)) {
-      continue
-    }
-
-    const matches = [...line.matchAll(timeRegex)]
-    if (matches.length > 0) {
-      hasTimestamp = true
-      const text = line.replace(timeRegex, '').trim()
-      for (const match of matches) {
-        const min = parseInt(match[1], 10)
-        const sec = parseInt(match[2], 10)
-        const msStr = match[3] || '0'
-        let ms = 0
-        if (msStr.length === 1) ms = parseInt(msStr, 10) * 100
-        else if (msStr.length === 2) ms = parseInt(msStr, 10) * 10
-        else ms = parseInt(msStr.slice(0, 3), 10)
-
-        const time = min * 60 + sec + ms / 1000
-        parsedLines.push({ time, text: text || '♪' })
-      }
-    }
-  }
-
-  if (hasTimestamp && parsedLines.length > 0) {
-    parsedLines.sort((a, b) => a.time - b.time)
-    return { synced: true, lines: parsedLines }
-  }
-
-  // Letra sin sincronización (texto plano)
-  const plainLines = rawLines
-    .map(l => l.trim())
-    .filter(l => l.length > 0 && !/^\[(ti|ar|al|by|offset|length):/i.test(l))
-    .map((text, idx) => ({ time: idx, text }))
-
-  return { synced: false, lines: plainLines }
-}
-
 ipcMain.handle('get-track-lyrics', async (_, filePath) => {
   if (!filePath || typeof filePath !== 'string') return { synced: false, lines: [] }
   try {
+    const musicDir = await getMusicDirectory()
+    const realMusicDir = await getRealMusicDirectory()
+    const allowedRoots = [musicDir, realMusicDir].filter(Boolean)
+    if (!SecurityService.isPathInside(filePath, allowedRoots)) {
+      Logger.warn('Security', `get-track-lyrics ruta rechazada: ${filePath}`)
+      return { synced: false, lines: [] }
+    }
     const normalizedPath = path.normalize(filePath)
     const dir = path.dirname(normalizedPath)
     const baseName = path.parse(normalizedPath).name
 
     // 1. Buscar archivo .lrc o .txt externo en el mismo directorio del álbum o en Canciones_reales
-    const realMusicDir = await getRealMusicDirectory()
     const candidateFiles = [
       path.join(dir, `${baseName}.lrc`),
       path.join(dir, `${baseName}.LRC`),
@@ -1677,12 +1633,9 @@ ipcMain.handle('delete-album-folder', async (_, { albumPath, selectedDirectory }
   const resolvedPath = path.resolve(albumPath)
 
   // Medida de seguridad esencial: no permitir borrar fuera de musicDir ni la carpeta raíz
-  if (resolvedPath.toLowerCase() === musicDir.toLowerCase()) {
-    return { success: false, error: 'No se puede eliminar la carpeta raíz de música' }
-  }
-
-  if (!resolvedPath.toLowerCase().startsWith(musicDir.toLowerCase() + path.sep)) {
-    return { success: false, error: 'La carpeta está fuera del directorio de música' }
+  if (resolvedPath.toLowerCase() === musicDir.toLowerCase() || !SecurityService.isPathInside(resolvedPath, [musicDir])) {
+    Logger.warn('Security', `delete-album-folder intento no autorizado: ${resolvedPath}`)
+    return { success: false, error: 'La carpeta está fuera del directorio de música o es la carpeta raíz' }
   }
 
   try {
@@ -1780,12 +1733,6 @@ ipcMain.on('window-minimize', () => {
   }, 16)
 })
 
-ipcMain.on('renderer-ready', () => {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
-    mainWindow.show()
-  }
-})
-
 ipcMain.on('window-maximize', () => {
   if (mainWindow) {
     if (mainWindow.isMaximized()) {
@@ -1831,6 +1778,7 @@ ipcMain.on('restore-main-window', () => {
       mainWindow.show()
     }
     mainWindow.focus()
+    mainWindow.webContents.invalidate()
     if (panelSettings.autoHide && !panelSettings.pinned) {
       setSidePanelBounds('collapsed', { cooldown: true })
     }
@@ -1908,6 +1856,15 @@ ipcMain.on('show-track-notification', (_, track) => {
 })
 
 ipcMain.on('player-command', (event, command) => {
+  if (typeof command === 'string' && command.startsWith('theme-')) {
+    const isLight = command === 'theme-light'
+    const color = isLight ? '#f3f4f8' : '#0f0f13'
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.setBackgroundColor(color)
+      } catch (_) {}
+    }
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('player-command', command)
   }
@@ -1960,11 +1917,16 @@ ipcMain.handle('launch-extractor', async (_, payload) => {
     clipboard.writeText(url)
   }
 
+  const userHome = process.env.USERPROFILE || process.env.HOME || ''
+  const localAppData = process.env.LOCALAPPDATA || (userHome ? path.join(userHome, 'AppData', 'Local') : '')
+  const parentProjectDir = path.resolve(app.getAppPath(), '..', 'Extractor_Musica')
+
   const possiblePaths = [
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Extractor_Musica', 'Extractor_Musica.exe'),
-    'C:\\Users\\barre\\AppData\\Local\\Programs\\Extractor_Musica\\Extractor_Musica.exe',
-    'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\dist\\Extractor_Musica_Portable\\Extractor_Musica.exe'
-  ]
+    localAppData ? path.join(localAppData, 'Programs', 'Extractor_Musica', 'Extractor_Musica.exe') : '',
+    userHome ? path.join(userHome, 'AppData', 'Local', 'Programs', 'Extractor_Musica', 'Extractor_Musica.exe') : '',
+    path.join(parentProjectDir, 'dist', 'Extractor_Musica_Portable', 'Extractor_Musica.exe'),
+    userHome ? path.join(userHome, 'PyCharmMiscProject', 'Extractor_Musica', 'dist', 'Extractor_Musica_Portable', 'Extractor_Musica.exe') : ''
+  ].filter(Boolean)
 
   for (const exePath of possiblePaths) {
     try {
@@ -1975,22 +1937,35 @@ ipcMain.handle('launch-extractor', async (_, payload) => {
     } catch (_) {}
   }
 
-  // Fallback a script Python en PyCharmMiscProject
-  const pythonPath = 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\.venv\\Scripts\\python.exe'
-  const scriptPath = 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica\\main.py'
-  try {
-    await fs.promises.access(pythonPath)
-    await fs.promises.access(scriptPath)
-    const child = spawn(pythonPath, [scriptPath], {
-      cwd: 'C:\\Users\\barre\\PyCharmMiscProject\\Extractor_Musica',
-      detached: true,
-      stdio: 'ignore'
-    })
-    child.unref()
-    return { success: true, method: 'python' }
-  } catch (err) {
-    return { success: false, error: 'No se encontró el ejecutable ni el entorno de Extractor_Musica' }
+  // Fallback a script Python en proyecto hermano o directorio de usuario
+  const pythonCandidates = [
+    path.join(parentProjectDir, '.venv', 'Scripts', 'python.exe'),
+    userHome ? path.join(userHome, 'PyCharmMiscProject', 'Extractor_Musica', '.venv', 'Scripts', 'python.exe') : ''
+  ].filter(Boolean)
+
+  const scriptCandidates = [
+    path.join(parentProjectDir, 'main.py'),
+    userHome ? path.join(userHome, 'PyCharmMiscProject', 'Extractor_Musica', 'main.py') : ''
+  ].filter(Boolean)
+
+  for (let i = 0; i < pythonCandidates.length; i++) {
+    const pythonPath = pythonCandidates[i]
+    const scriptPath = scriptCandidates[i] || scriptCandidates[0]
+    if (!pythonPath || !scriptPath) continue
+    try {
+      await fs.promises.access(pythonPath)
+      await fs.promises.access(scriptPath)
+      const child = spawn(pythonPath, [scriptPath], {
+        cwd: path.dirname(scriptPath),
+        detached: true,
+        stdio: 'ignore'
+      })
+      child.unref()
+      return { success: true, method: 'python' }
+    } catch (_) {}
   }
+
+  return { success: false, error: 'No se encontró el ejecutable ni el entorno de Extractor_Musica' }
 })
 
 ipcMain.handle('check-hardlinks-health', async () => {
@@ -2009,6 +1984,14 @@ ipcMain.handle('repair-hardlinks-integrity', async () => {
 })
 
 ipcMain.handle('fetch-track-lyrics-online', async (_, { trackPath, title, artist, duration, saveToDisk = false, bypassCache = false }) => {
+  if (trackPath && typeof trackPath === 'string') {
+    const musicDir = await getMusicDirectory()
+    const realMusicDir = await getRealMusicDirectory()
+    if (!SecurityService.isPathInside(trackPath, [musicDir, realMusicDir].filter(Boolean))) {
+      Logger.warn('Security', `fetch-track-lyrics-online ruta rechazada: ${trackPath}`)
+      return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+    }
+  }
   const res = await downloadTrackMetadataAndLyrics(trackPath, title, artist, duration, {
     saveToDisk: Boolean(saveToDisk),
     bypassCache: Boolean(bypassCache)
@@ -2023,26 +2006,42 @@ ipcMain.handle('fetch-track-lyrics-online', async (_, { trackPath, title, artist
 })
 
 ipcMain.handle('save-track-lrc', async (_, { trackPath, lyricsText }) => {
+  if (!trackPath || typeof trackPath !== 'string') {
+    return { success: false, error: 'Ruta inválida' }
+  }
+  const musicDir = await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  if (!SecurityService.isPathInside(trackPath, [musicDir, realMusicDir].filter(Boolean))) {
+    Logger.warn('Security', `save-track-lrc ruta rechazada: ${trackPath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
   let ino = null
   try {
     const st = await fs.promises.stat(trackPath, { bigint: true })
     ino = st.ino
   } catch (_) {}
   removeFromMetadataCache(trackPath, ino)
-  const realMusicDir = await getRealMusicDirectory()
   const res = await saveTrackLrcFile(trackPath, lyricsText, realMusicDir)
   removeFromMetadataCache(trackPath, ino)
   return res
 })
 
 ipcMain.handle('delete-track-lrc', async (_, { trackPath }) => {
+  if (!trackPath || typeof trackPath !== 'string') {
+    return { success: false, error: 'Ruta inválida' }
+  }
+  const musicDir = await getMusicDirectory()
+  const realMusicDir = await getRealMusicDirectory()
+  if (!SecurityService.isPathInside(trackPath, [musicDir, realMusicDir].filter(Boolean))) {
+    Logger.warn('Security', `delete-track-lrc ruta rechazada: ${trackPath}`)
+    return { success: false, error: 'Acceso no permitido fuera del directorio de música' }
+  }
   let ino = null
   try {
     const st = await fs.promises.stat(trackPath, { bigint: true })
     ino = st.ino
   } catch (_) {}
   removeFromMetadataCache(trackPath, ino)
-  const realMusicDir = await getRealMusicDirectory()
   const res = await deleteTrackLrcFile(trackPath, realMusicDir)
   removeFromMetadataCache(trackPath, ino)
   return res
@@ -2167,6 +2166,7 @@ app.whenReady().then(() => {
         if (mainWindow.isMinimized()) mainWindow.restore()
         mainWindow.show()
         mainWindow.focus()
+        mainWindow.webContents.invalidate()
       }
     },
     toggleAlwaysOnTop: () => {

@@ -80,7 +80,7 @@ export class FileSystemService {
         } else if (entry.isFile()) {
           try {
             const st = await fs.promises.stat(fullPath, { bigint: true })
-            if (st.ino === targetIno && SecurityService.normalizePath(fullPath).startsWith(resolvedRealDir)) {
+            if (st.ino === targetIno && SecurityService.isPathInside(fullPath, [realDir])) {
               matches.push({ path: fullPath, nlink: Number(st.nlink || 1) })
             }
           } catch (_) {}

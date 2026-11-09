@@ -4,18 +4,51 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Reproductor de Música</title>
+  <style>
+    /* Estilos síncronos críticos en <head> para evitar FOUC y destellos blancos en t=0ms */
+    :root, html, body, #root {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background-color: #0f0f13;
+      color: #e8e8f0;
+      overflow: hidden;
+    }
+    html[data-theme='light'],
+    html[data-theme='light'] body,
+    html[data-theme='light'] #root {
+      background-color: #f3f4f8;
+      color: #20212b;
+    }
+    html[data-window-mode='mini'],
+    html[data-window-mode='mini'] body,
+    html[data-window-mode='mini'] #root,
+    html[data-window-mode='notification'],
+    html[data-window-mode='notification'] body,
+    html[data-window-mode='notification'] #root,
+    html[data-window-mode='overlay'],
+    html[data-window-mode='overlay'] body,
+    html[data-window-mode='overlay'] #root {
+      background-color: transparent !important;
+      background: transparent !important;
+    }
+  </style>
   <script>
     (function () {
       try {
         var root = document.documentElement;
         var savedTheme = window.localStorage.getItem('musicPlayerTheme');
-        root.dataset.theme = savedTheme === 'light' ? 'light' : 'dark';
+        var isLight = savedTheme === 'light';
+        root.dataset.theme = isLight ? 'light' : 'dark';
         var hash = window.location.hash;
         if (hash === '#/mini' || hash === '#/notification' || hash === '#/overlay') {
           root.dataset.windowMode = hash.slice(2);
           root.style.background = 'transparent';
         } else {
           root.dataset.windowMode = 'main';
+          var bg = isLight ? '#f3f4f8' : '#0f0f13';
+          root.style.backgroundColor = bg;
         }
       } catch (_) {}
     })();

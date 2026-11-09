@@ -67,14 +67,25 @@ function MainPlayerApp({ theme, onThemeChange }) {
     setIsExtractorOpen(false)
   }, [])
 
-  // Notificar inmediatamente al proceso principal que el DOM y el árbol React están montados
-  // para desplegar la ventana principal sin demoras ni parpadeos
+  const [isRestored, setIsRestored] = useState(false)
+
+  // Efecto suave de transición al restaurar la ventana desde el estado minimizado
   useEffect(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        window.electronAPI?.notifyRendererReady?.()
+    let unsub = null
+    let timer = null
+    if (window.electronAPI?.onMainWindowVisibility) {
+      unsub = window.electronAPI.onMainWindowVisibility((visible) => {
+        if (visible) {
+          setIsRestored(true)
+          if (timer) clearTimeout(timer)
+          timer = setTimeout(() => setIsRestored(false), 260)
+        }
       })
-    })
+    }
+    return () => {
+      if (timer) clearTimeout(timer)
+      if (unsub) unsub()
+    }
   }, [])
 
   // Sincronizar visibilidad del Panel Lateral
@@ -153,7 +164,7 @@ function MainPlayerApp({ theme, onThemeChange }) {
   }, [togglePlay, adjustVolume])
 
   return (
-    <div className="app">
+    <div className={`app ${isRestored ? 'window-restored' : ''}`}>
       {/* Barra de título personalizada con jerarquía visual equilibrada */}
       <header className="titlebar">
         <div className="titlebar-drag">

@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { getTrackUniqueKey, TODOS_ALBUM_COVER } from '../utils/trackUtils'
+import { buildShuffledIndices } from '@shared/shuffle'
 
 const LibraryContext = createContext(null)
 const PlaybackContext = createContext(null)
@@ -179,7 +180,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   // Instanciar HTMLAudioElement una sola vez y únicamente en la ventana principal
   const audioRef = useRef(null)
   if (!isMiniPanel && !audioRef.current && typeof Audio !== 'undefined') {
-    audioRef.current = new Audio()
+    const audio = new Audio()
+    audio.preload = 'auto'
+    audioRef.current = audio
   }
   const savedSessionRef = useRef(!isMiniPanel ? loadSavedSession() : null)
   const sessionRestoredRef = useRef(false)
@@ -576,7 +579,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext
       if (!AudioCtx) return null
-      const ctx = new AudioCtx()
+      // latencyHint: 'playback' asigna un búfer más robusto para blindar contra cortes de audio en segundo plano
+      const ctx = new AudioCtx({ latencyHint: 'playback' })
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 128 // 64 bandas de frecuencia de alta resolución
       analyser.smoothingTimeConstant = 0.60 // Respuesta rápida, enérgica y ágil al ritmo
@@ -993,40 +997,6 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (!currentTrack?.path) return
     loadLyricsForTrack(currentTrack, { forceOnline: true, bypassCache: true })
   }, [currentTrack, loadLyricsForTrack])
-
-  // Barajado uniforme Fisher-Yates de índices candidatos
-  const buildShuffledIndices = useCallback((list, excludeIds = new Set(), avoidRecentIds = new Set()) => {
-    const indices = []
-    for (let i = 0; i < list.length; i++) {
-      const id = list[i]?.id ?? i
-      if (!excludeIds.has(id)) {
-        indices.push(i)
-      }
-    }
-    for (let i = indices.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      const tmp = indices[i]
-      indices[i] = indices[j]
-      indices[j] = tmp
-    }
-    // Como extraemos con .pop(), el próximo en sonar es el último elemento del array.
-    // Evitar que las canciones recién escuchadas al final del ciclo anterior salgan primeras en el nuevo ciclo.
-    if (avoidRecentIds.size > 0 && indices.length > avoidRecentIds.size) {
-      const fresh = []
-      const recent = []
-      for (const idx of indices) {
-        const id = list[idx]?.id ?? idx
-        if (avoidRecentIds.has(id)) {
-          recent.push(idx)
-        } else {
-          fresh.push(idx)
-        }
-      }
-      // recent al principio del array (saldrán al final del ciclo), fresh al final (saldrán primero con .pop())
-      return [...recent, ...fresh]
-    }
-    return indices
-  }, [])
 
   // Carga un archivo de audio en el elemento Audio y actualiza estados de reproducción
   const loadAndPlayTrack = useCallback((track, album = null, index = -1) => {
@@ -1643,6 +1613,32 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
     }
   }, [isMiniPanel, togglePlay, previousTrack, nextTrack, seekTo, duration])
+
+  // Garantizar continuidad de audio al cambiar visibilidad, minimizar o restaurar la app
+  useEffect(() => {
+    if (isMiniPanel) return
+    const ensureAudioRunning = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended' && audioRef.current && !audioRef.current.paused) {
+        audioContextRef.current.resume().catch(() => {})
+      }
+    }
+
+    document.addEventListener('visibilitychange', ensureAudioRunning)
+    window.addEventListener('focus', ensureAudioRunning)
+
+    let unsubVis = null
+    if (window.electronAPI?.onMainWindowVisibility) {
+      unsubVis = window.electronAPI.onMainWindowVisibility((visible) => {
+        if (visible) ensureAudioRunning()
+      })
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', ensureAudioRunning)
+      window.removeEventListener('focus', ensureAudioRunning)
+      if (unsubVis) unsubVis()
+    }
+  }, [isMiniPanel])
 
   // Escuchar cambios automáticos en la carpeta de música (Folder Watcher del backend)
   useEffect(() => {

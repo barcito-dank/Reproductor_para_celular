@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { areSameTrack } from '../utils/trackUtils'
 
 const ALBUM_ROW_HEIGHT = 63 // 60px alto de fila + 3px margen inferior
-const ALBUM_OVERSCAN = 8
+const ALBUM_OVERSCAN = 18 // Margen aumentado para pre-cargar y decodificar imágenes antes de entrar en viewport
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -127,7 +127,6 @@ const TrackRow = React.memo(function TrackRow({
               src={track.cover}
               alt=""
               className="track-thumb-img"
-              loading="lazy"
               decoding="async"
               onError={(e) => {
                 e.currentTarget.style.display = 'none'
@@ -1412,7 +1411,7 @@ function AlbumView() {
     setViewportHeight((prev) => (Math.abs(prev - viewH) > 4 ? viewH : prev))
   }, [])
 
-  // Suscribir al scroll y resize del contenedor .main-view
+  // Suscribir al scroll y resize del contenedor .main-view sincronizado con requestAnimationFrame
   useEffect(() => {
     if (isLoading || !selectedAlbum) return undefined
     const listEl = listRef.current
@@ -1420,10 +1419,27 @@ function AlbumView() {
     const scrollContainer = listEl.closest('.main-view')
     if (!scrollContainer) return undefined
 
-    const onScroll = () => updateVisibleWindow()
+    let ticking = false
+    const onScroll = () => {
+      if (!ticking) {
+        ticking = true
+        requestAnimationFrame(() => {
+          updateVisibleWindow()
+          ticking = false
+        })
+      }
+    }
     scrollContainer.addEventListener('scroll', onScroll, { passive: true })
 
-    const ro = new ResizeObserver(() => updateVisibleWindow())
+    const ro = new ResizeObserver(() => {
+      if (!ticking) {
+        ticking = true
+        requestAnimationFrame(() => {
+          updateVisibleWindow()
+          ticking = false
+        })
+      }
+    })
     ro.observe(scrollContainer)
 
     updateVisibleWindow()
