@@ -1,95 +1,90 @@
-# 🎵 Reproductor de Música Personal (Desktop App)
+# 📱🎵 Reproductor de Música Personal (Mobile-First Android & Capacitor)
 
-Aplicación de escritorio moderna, ultra-optimizada y de baja latencia para reproducir, organizar y gestionar bibliotecas musicales locales sin conexión en **Windows 10/11**. Construida con **Electron**, **React 18**, **TypeScript**, **Vite**, **Web Audio API** y **music-metadata**.
+Aplicación móvil nativa para **Android (optimizada para dispositivos Motorola)** y entorno Web moderno, diseñada para reproducir, organizar y gestionar bibliotecas musicales y de video locales sin conexión con **cero duplicación de almacenamiento** y **reproducción continua garantizada con pantalla apagada**.
+
+Construida con **Capacitor 6**, **AndroidX Media3 (ExoPlayer + MediaSessionService)**, **SQLite (`@capacitor-community/sqlite`)**, **React 18**, **TypeScript**, **Vite 5** y **music-metadata**.
 
 ---
 
 ## 📑 Tabla de Contenidos
-1. [Visión General y Propósito](#-visión-general-y-propósito)
-2. [Arquitectura General del Sistema](#-arquitectura-general-del-sistema)
+1. [Visión General y Arquitectura Mobile-First](#-visión-general-y-arquitectura-mobile-first)
+2. [Diagrama de Arquitectura del Sistema](#-diagrama-de-arquitectura-del-sistema)
 3. [Estructura del Proyecto](#-estructura-del-proyecto)
-4. [Módulos y Servicios del Núcleo](#-módulos-y-servicios-del-núcleo)
-   - [4.1. Servicios Backend (TypeScript / Electron Main)](#41-servicios-backend-typescript--electron-main)
-   - [4.2. Motor de Escaneo, Metadatos y Hard Links NTFS](#42-motor-de-escaneo-metadatos-y-hard-links-ntfs)
-   - [4.3. Ventanas Especializadas y Detección de Bordes](#43-ventanas-especializadas-y-detección-de-bordes)
-   - [4.4. Frontend React, Estado y Rendimiento](#44-frontend-react-estado-y-rendimiento)
-   - [4.5. Motor de Audio, Ecualizador y Visualizador Espectral](#45-motor-de-audio-ecualizador-y-visualizador-espectral)
-5. [Características Destacadas](#-características-destacadas)
-6. [Atajos de Teclado y Control Global](#-atajos-de-teclado-y-control-global)
-7. [Suite de Pruebas Automatizadas](#-suite-de-pruebas-automatizadas)
-8. [Instalación y Comandos de Compilación](#-instalación-y-comandos-de-compilación)
+4. [Pilares de Ingeniería Móvil](#-pilares-de-ingeniería-móvil)
+   - [4.1. Motor Single Physical Store + Virtual Inode Index (SQLite)](#41-motor-single-physical-store--virtual-inode-index-sqlite)
+   - [4.2. Servicio Nativo AndroidX Media3 (ExoPlayer + ForegroundService)](#42-servicio-nativo-androidx-media3-exoplayer--foregroundservice)
+   - [4.3. Ecualizador Híbrido de 10 Bandas (DSP Hardware + Web Audio)](#43-ecualizador-híbrido-de-10-bandas-dsp-hardware--web-audio)
+   - [4.4. Interfaz Táctil Mobile-First y Ergonomía One-Handed](#44-interfaz-táctil-mobile-first-y-ergonomía-one-handed)
+5. [Características Principales](#-características-principales)
+6. [Suite de Pruebas Automatizadas (Vitest)](#-suite-de-pruebas-automatizadas-vitest)
+7. [Guía Paso a Paso: Compilación y Despliegue en Motorola](#-guía-paso-a-paso-compilación-y-despliegue-en-motorola)
 
 ---
 
-## 🌟 Visión General y Propósito
+## 🌟 Visión General y Arquitectura Mobile-First
 
-El **Reproductor de Música Personal** fue concebido para superar las deficiencias habituales de reproductores pesados basados en Chromium y servicios de streaming:
-- **Cero latencia y cero micro-cortes**: Blindado contra el estrangulamiento de segundo plano de Windows (*EcoQoS / Efficiency Mode*) y priorizado para ejecutarse en segundo plano mientras juegas a títulos competitivos exigentes (*League of Legends*, shooters, etc.) sin caídas de FPS ni *stuttering* de audio.
-- **Acceso instantáneo con múltiples interfaces**: Mini panel lateral flotante con hit-testing por píxel, Game Overlay HUD para videojuegos, notificaciones transparentes y ventana principal completa.
-- **Arquitectura de Enlaces Duros NTFS (Hard Links)**: Almacena los archivos maestros en `Canciones_reales/` y los organiza en múltiples carpetas y álbumes dentro de `canciones_organizadas/` ocupando **0 bytes adicionales** en disco y sincronizando inodos automáticamente.
-- **Ecualizador paramétrico de 10 bandas y analizador visual**: Procesamiento de hardware en tiempo real con Web Audio API y renderizado en Canvas con física de gravedad para picos espectrales.
-- **Letras sincronizadas (LRC)**: Soporte completo de letras karaoke sincronizadas con desplazamiento suave, modo temporal en memoria y descarga masiva desde la API de LRCLib.
-- **Discord Rich Presence nativo**: Conexión directa mediante Windows Named Pipes (`\\?\pipe\discord-ipc-*`) sin librerías externas en C++.
+El **Reproductor de Música Personal** resuelve de raíz las limitaciones de los sistemas de archivos móviles en Android (donde `sdcardfs` / `FUSE` bloquean los enlaces duros `fs.link` de escritorio) y las restricciones agresivas de batería al apagar la pantalla:
+
+- **Bóveda Relacional Sin Duplicación (*Single Physical Store + Virtual Inode Index*)**: Reemplaza los Hard Links NTFS de escritorio por un almacén físico único en `Directory.Data/app_vault/tracks/` indexado mediante una relación muchos-a-muchos (`M:N`) en **SQLite**. Asignar una canción a 10 álbumes distintos ocupa **0 bytes adicionales** en la memoria del teléfono.
+- **Reproducción Ininterrumpida con Pantalla Apagada (`AndroidX Media3`)**: Servicio nativo en primer plano (`MediaPlaybackService` con `foregroundServiceType="mediaPlayback"` y `C.WAKE_MODE_LOCAL`) que mantiene el CPU y el decodificador `ExoPlayer` activos aunque bloquees el Motorola o cambies de aplicación.
+- **Integración Total con Android SystemUI y Bluetooth**: Controles nativos en la **pantalla de bloqueo**, **cortina de notificaciones** con carátula de alta resolución y respuesta instantánea a botones de **auriculares Bluetooth** (`Play`, `Pause`, `Siguiente`, `Anterior`, `Seek`).
+- **UX Táctil Fluida a 60/120 Hz**: Barra de navegación inferior (`BottomNavBar`), `MiniPlayer` flotante sobre la navegación, hoja deslizable a pantalla completa (`NowPlayingSheet`), hojas de acción inferiores (*Bottom Action Sheets*) y respuesta háptica nativa (`@capacitor/haptics`).
 
 ---
 
-## 🏗️ Arquitectura General del Sistema
+## 🏗️ Diagrama de Arquitectura del Sistema
 
 ```mermaid
 flowchart TD
-    subgraph SO["Sistema Operativo Windows"]
-        DiskMaster["Canciones_reales (Archivos Maestros)"]
-        DiskOrganized["canciones_organizadas (Hard Links NTFS)"]
-        SMTC["Windows Media Session (SMTC)"]
-        NamedPipes["Discord IPC Named Pipes"]
-        DWM["DWM / Compositor DirectComposition"]
+    subgraph AndroidOS["Sistema Operativo Android (Motorola)"]
+        VaultFS["Directory.Data (app_vault/tracks & lyrics)"]
+        CacheFS["Directory.Cache (.covers/[sha256].jpg)"]
+        SQLiteDB["SQLite Database (music_vault)"]
+        LockScreen["Pantalla de Bloqueo / Cortina de Notificaciones"]
+        Bluetooth["Auriculares Bluetooth / Controles Multimedia"]
     end
 
-    subgraph MainProcess["Electron Main Process (TypeScript / Node.js)"]
-        PowerMgr["PowerManager (PRIORITY_ABOVE_NORMAL + powerSaveBlocker)"]
-        SecService["SecurityService (Path Traversal & Sanitización)"]
-        FSService["FileSystemService (Hard links, Inodos, Unlink seguro)"]
-        Logger["Logger (Logs rotativos en disco)"]
-        TrayMgr["TrayManager (Bandeja del sistema)"]
-        Scanner["Scanner recursivo + Caché MD5 (.covers / .library_cache)"]
-        Discord["DiscordRPC (Named Pipes IPC)"]
-        LyricsDownloader["LyricsDownloader (LRCLib API masiva)"]
-        HealthCheck["HardlinksHealth (Auditoría y autoreparación)"]
-        EdgeEngine["Motor de Detección de Bordes (Hit-testing adaptativo)"]
+    subgraph NativeLayer["Capa Nativa Android (Java / AndroidX Media3)"]
+        Plugin["NativeAudioPlayerPlugin (@CapacitorPlugin)"]
+        MediaService["MediaPlaybackService (MediaSessionService)"]
+        Exo["ExoPlayer (WAKE_MODE_LOCAL + AudioFocus)"]
+        HwEQ["Android AudioFX Equalizer (Interpolación 10 Bandas)"]
     end
 
-    subgraph Preload["Preload Seguro (src/preload)"]
-    Bridge["contextBridge (window.electronAPI)"]
-    end
-
-    subgraph RendererProcess["React 18 + Vite Renderer (src/renderer)"]
-        subgraph StateManagement["Gestión de Estado Segregada"]
-            LibCtx["LibraryContext (Árbol y carpetas)"]
-            PlayCtx["PlaybackContext (Cola, volumen, EQ)"]
-            TimeCtx["PlayerTimeContext (Tiempo alta frec.)"]
+    subgraph WebLayer["Frontend React 18 + TypeScript + Vite (Capacitor WebView)"]
+        subgraph Services["Servicios de Dominio e Infraestructura"]
+            VaultSvc["StorageVaultService.ts (M:N Reference Counting)"]
+            MetaExt["metadataExtractor.ts (music-metadata + SHA-256)"]
+            AudioBridge["NativeAudioBridge.ts (Sync + App Lifecycle)"]
+            MobBridge["mobileBridge.ts (API Unificada)"]
         end
-        subgraph AudioCore["Motor de Audio de Alta Fidelidad"]
-            HTML5Audio["HTML5 Audio Element (latencyHint: playback)"]
-            WebAudio["AudioContext + 10-Band EQ + AnalyserNode"]
+        subgraph Contexts["Contextos React Segregados"]
+            LibCtx["LibraryContext (Árbol de Álbumes y Carpetas)"]
+            PlayCtx["PlaybackContext (Cola, Shuffle, Loop, EQ)"]
+            TimeCtx["PlayerTimeContext (Progreso de Alta Frecuencia)"]
         end
-        subgraph WindowsUI["Vistas Multiventana"]
-            MainWindow["Ventana Principal (Sidebar, AlbumView, Player)"]
-            MiniPanel["MiniPanel Lateral (#/mini)"]
-            ToastWindow["ToastNotification (#/notification)"]
-            GameHUD["GameOverlay HUD (#/overlay)"]
+        subgraph TouchUI["Interfaz Mobile-First"]
+            BottomNav["BottomNavBar (4 Pestañas + Safe Area)"]
+            MiniAndSheet["Player.jsx (MiniPlayer + NowPlayingSheet)"]
+            AlbumTouch["AlbumView.jsx (Lista Virtualizada + Action Sheet)"]
+            LyricsUI["LyricsDock.jsx (Karaoke LRC + LRCLib)"]
         end
     end
 
-    DiskOrganized <--> FSService
-    DiskMaster <--> FSService
-    FSService <--> Scanner
-    Scanner --> Bridge
-    EdgeEngine <--> DWM
-    Bridge <--> StateManagement
-    StateManagement <--> AudioCore
-    SMTC <--> StateManagement
-    Discord <--> NamedPipes
-    AudioCore --> WindowsUI
+    VaultFS <--> VaultSvc
+    CacheFS <--> VaultSvc
+    SQLiteDB <--> VaultSvc
+    MetaExt --> VaultSvc
+    VaultSvc --> MobBridge
+    MobBridge <--> Contexts
+    Contexts <--> AudioBridge
+    AudioBridge <--> Plugin
+    Plugin <--> MediaService
+    MediaService --> Exo
+    Exo --> HwEQ
+    MediaService <--> LockScreen
+    MediaService <--> Bluetooth
+    Contexts --> TouchUI
 ```
 
 ---
@@ -97,219 +92,141 @@ flowchart TD
 ## 📂 Estructura del Proyecto
 
 ```text
-Reproductor_de_musica/
-├── Aplicacion_Compilada/          # Distribución final para el usuario (instalador y portable)
-│   ├── Instalador/                 # Instalador asistido NSIS de Windows (.exe)
-│   ├── Version_Portable/           # Versión ejecutable autónoma sin instalación (.exe)
-│   └── Iniciar Reproductor.lnk    # Acceso directo preconfigurado
-├── canciones_organizadas/          # Biblioteca musical local organizada por álbumes
-│   ├── .covers/                    # Caché de carátulas deduplicadas por hash MD5
-│   ├── .library_cache.json         # Caché de metadatos validada por mtimeMs
-│   └── .song_albums_index.json     # Índice relacional inodo-álbumes
-├── scripts/                        # Scripts PowerShell de automatización
-│   ├── update_compiled_app.ps1     # Empaquetado y sincronización con Aplicacion_Compilada/
-│   ├── create_shortcut.ps1         # Creación de accesos directos en el Escritorio
-│   └── generate_icon.ps1           # Generador de archivos .ico multirresolución
+Reproductor_de_musica_para_celu/
+├── android/                        # Proyecto nativo Android generado y configurado con Capacitor
+│   ├── app/
+│   │   ├── build.gradle            # Dependencias AndroidX Media3 (ExoPlayer, Session, UI)
+│   │   └── src/main/
+│   │       ├── AndroidManifest.xml # Permisos Media Playback, WakeLock y MediaPlaybackService
+│   │       └── java/com/reproductor/musica/
+│   │           ├── MainActivity.java             # Registro de NativeAudioPlayerPlugin
+│   │           ├── MediaPlaybackService.java     # Servicio MediaSessionService + ExoPlayer + EQ
+│   │           └── NativeAudioPlayerPlugin.java  # Puente Capacitor JS <-> Media3
+│   └── variables.gradle            # SDK Versions (minSdk 22, compileSdk 34, targetSdk 34)
 ├── src/
-│   ├── main/                       # Proceso Principal de Electron (Node.js & TypeScript)
-│   │   ├── services/               # Servicios desacoplados de infraestructura (TypeScript)
-│   │   │   ├── FileSystemService.ts # Enlaces duros NTFS, reintentos exponenciales, inodos
-│   │   │   ├── SecurityService.ts   # Sanitización de rutas y nombres, bloqueo de Path Traversal
-│   │   │   ├── PowerManager.ts      # Boost de prioridad (CPU) y prevención de suspensión
-│   │   │   ├── Logger.ts            # Sistema de logging rotativo en disco
-│   │   │   └── TrayManager.ts       # Menú contextual y gestión de bandeja del sistema
-│   │   ├── index.js                # Orquestador del ciclo de vida, ventanas e IPC
-│   │   ├── scanner.js              # Escaneo asíncrono limitado, caché y extracción de tags
-│   │   ├── hotkeys.js              # Registro y despacho de atajos globales
-│   │   ├── discordRpc.js           # Rich Presence sobre Named Pipes sin módulos C++
-│   │   ├── lyricsDownloader.js     # Cliente LRCLib para descarga masiva de letras
-│   │   └── hardlinksHealth.js      # Auditoría de salud y auto-reparación de inodos
-│   ├── preload/                    # Puente Seguro IPC
-│   │   └── index.js                # contextBridge con API tipada e inmutable
-│   ├── shared/                     # Módulos de dominio compartidos y tipados (TypeScript)
-│   │   ├── types.ts                # Definiciones de Track, Album, PlayerState, etc.
-│   │   ├── lyricsParser.ts         # Parser de letras LRC y marcas de tiempo
+│   ├── shared/                     # Módulos compartidos y tipados (TypeScript puro)
+│   │   ├── types.ts                # Contratos de Track, Album, PlayerState y Settings
+│   │   ├── security.ts             # Sanitización multiplataforma y bloqueo de Path Traversal
+│   │   ├── lyricsParser.ts         # Parser de letras sincronizadas LRC ([mm:ss.xx])
 │   │   └── shuffle.ts              # Algoritmo Fisher-Yates sin repetición cíclica
-│   └── renderer/                   # Proceso de Renderizado (React 18 + Vite)
-│       ├── index.html              # Shell HTML con script Zero-FOUC
+│   └── renderer/                   # Aplicación Frontend React 18 + Vite
+│       ├── index.html              # Viewport móvil (viewport-fit=cover) y arranque Zero-FOUC
 │       └── src/
-│           ├── main.jsx            # Punto de montaje React
-│           ├── App.jsx             # Ruteo (#/mini, #/notification, #/overlay) y Suspense
-│           ├── App.css             # Estilos completos con soporte para tema Dark y Light
+│           ├── main.jsx            # Inicialización de mobileBridge y montaje de React
+│           ├── App.jsx             # Layout móvil con BottomNavBar, vistas y modales
+│           ├── App.css             # Sistema de diseño táctil, safe-areas y animaciones
+│           ├── services/
+│           │   ├── StorageVaultService.ts # Motor SQLite M:N + conteo de referencias + Filesystem
+│           │   ├── metadataExtractor.ts   # Extracción de tags ID3/MP4/FLAC y hash SHA-256
+│           │   ├── NativeAudioBridge.ts   # Sincronización con NativeAudioPlayer y @capacitor/app
+│           │   └── mobileBridge.ts        # Adaptador completo de biblioteca, letras y bóveda
 │           ├── context/
-│           │   └── PlayerContext.jsx # Estado global dividido, Web Audio API y EQ
-│           ├── components/
-│           │   ├── Sidebar.jsx          # Explorador de biblioteca, Drag & Drop y modales
-│           │   ├── AlbumView.jsx        # Vista de álbum virtualizada con marcadores
-│           │   ├── Player.jsx           # Controles inferiores, scrubbing y EQ
-│           │   ├── MiniPanel.jsx        # Panel lateral rápido flotante
-│           │   ├── GameOverlay.jsx      # HUD flotante para juegos con rueda de volumen
-│           │   ├── LyricsDock.jsx       # Dock de letras sincronizadas con karaoke
-│           │   ├── AudioVisualizer.jsx  # Analizador de espectro FFT en Canvas
-│           │   ├── SpotlightSearch.jsx  # Buscador global rápido (Ctrl+K / Ctrl+F)
-│           │   ├── SettingsModal.jsx    # Modal de configuración de 6 secciones
-│           │   ├── ExtractorModal.jsx   # Lanzador de extracción con auto-pegado
-│           │   ├── ErrorBoundary.jsx    # Aislamiento reactivo ante errores de interfaz
-│           │   └── ToastNotification.jsx# Notificación flotante de pista actual
-│           └── utils/
-│               └── trackUtils.js        # Utilidades de claves canónicas y portadas
-├── test/                           # Suite de Pruebas Automatizadas (Vitest)
-│   ├── lyrics.test.ts              # Pruebas de parseo LRC, tiempos y formato
-│   ├── security.test.ts            # Pruebas de sanitización y prevención de Path Traversal
+│           │   └── PlayerContext.jsx      # Orquestador de reproducción, cola, letras y EQ
+│           └── components/
+│               ├── BottomNavBar.jsx       # Navegación inferior táctil (Biblioteca, Álbum, Buscar, Ajustes)
+│               ├── Player.jsx             # MiniPlayer flotante + NowPlayingSheet a pantalla completa
+│               ├── AlbumView.jsx          # Vista de álbum virtualizada con Bottom Action Sheet
+│               ├── Sidebar.jsx            # Explorador jerárquico de álbumes y carpetas + importador
+│               ├── LyricsDock.jsx         # Visor karaoke sincronizado y búsqueda en LRCLib
+│               ├── AudioVisualizer.jsx    # Analizador espectral en Canvas a 60 FPS
+│               ├── SpotlightSearch.jsx    # Buscador instantáneo de canciones y álbumes
+│               ├── SettingsModal.jsx      # Ajustes móviles (Audio, Letras, Apariencia, Bóveda)
+│               └── ErrorBoundary.jsx      # Aislamiento resiliente ante errores de renderizado
+├── test/                           # Suite de pruebas unitarias e integración (Vitest)
+│   ├── vault.test.ts               # Pruebas de conteo de referencias M:N y limpieza física
+│   ├── lyrics.test.ts              # Pruebas de sincronización y parseo LRC
+│   ├── security.test.ts            # Pruebas de sanitización y seguridad de rutas
 │   └── shuffle.test.ts             # Pruebas estadísticas de aleatoriedad Fisher-Yates
-├── electron.vite.config.mjs         # Configuración Vite para Main, Preload y Renderer
-├── vitest.config.ts                # Configuración del ejecutor de pruebas Vitest
-├── tsconfig.json                   # Configuración del compilador TypeScript
-└── package.json                    # Scripts npm, dependencias y metadatos de compilación
+├── capacitor.config.ts             # Configuración de Capacitor (com.reproductor.musica)
+├── vite.config.ts                  # Configuración de compilación Web pura hacia dist-web/
+├── vitest.config.ts                # Configuración del runner de pruebas Vitest
+├── tsconfig.json                   # Configuración estricta de TypeScript
+└── package.json                    # Scripts y dependencias de Capacitor y React
 ```
 
 ---
 
-## ⚙️ Módulos y Servicios del Núcleo
+## ⚙️ Pilares de Ingeniería Móvil
 
-### 4.1. Servicios Backend (TypeScript / Electron Main)
+### 4.1. Motor Single Physical Store + Virtual Inode Index (SQLite)
 
-- **`PowerManager.ts`**: Eleva la prioridad del proceso principal y del proceso de renderizado (PID de audio) a `PRIORITY_ABOVE_NORMAL`. Controla el `powerSaveBlocker` para evitar que Windows active el modo de bajo consumo (*EcoQoS*) mientras haya audio sonando.
-- **`SecurityService.ts`**: Valida que cualquier ruta solicitada resida estrictamente dentro de las raíces autorizadas (`canciones_organizadas` o `Canciones_reales`), evitando ataques de *Path Traversal*. Sanitiza nombres prohibidos en Windows (`CON`, `PRN`, `AUX`, etc.) y caracteres ilegales (`\/:*?"<>|`).
-- **`FileSystemService.ts`**: Centraliza operaciones de disco sobre enlaces duros NTFS. Implementa `unlinkWithRetry` con retroceso exponencial ante bloqueos transitorios por antivirus o indexadores de Windows, y `findRealMusicFilesByInode` para resolver la relación física 1 a N de cada canción.
-- **`Logger.ts`**: Registro asíncrono con cola en memoria y volcado por lotes a archivos rotativos de 5 MB en `userData/logs/app.log`.
-- **`TrayManager.ts`**: Control de la bandeja del sistema con menús dinámicos que muestran el título truncado, reproducción, pausa, salto de pista y restauración inmediata de la ventana.
+- **Esquema Relacional (`StorageVaultService.ts`)**:
+  - `tracks`: Almacena cada pista única (`id`, `file_path`, `title`, `artist`, `duration`, `cover_hash`, `has_lrc`, `media_type`, `size_bytes`).
+  - `albums`: Soporta tanto álbumes como carpetas anidadas (`id`, `name`, `parent_id`, `node_type`, `custom_cover`).
+  - `album_tracks`: Tabla pivote (`album_id`, `track_id`, `track_order`) que permite que una misma canción pertenezca a múltiples álbumes sin duplicar el archivo físico.
+- **Recolección de Basura por Conteo de Referencias**:
+  - **Desvincular de un álbum**: Elimina únicamente la fila en `album_tracks`. Si `COUNT(*) > 0` en otros álbumes, el archivo maestro en `app_vault/tracks/` permanece intacto.
+  - **Eliminación del último vínculo**: Cuando `COUNT(*) == 0`, se elimina automáticamente el registro en `tracks`, el archivo físico de audio/video en `Directory.Data` y su archivo `.lrc` asociado.
 
-### 4.2. Motor de Escaneo, Metadatos y Hard Links NTFS
+### 4.2. Servicio Nativo AndroidX Media3 (`ExoPlayer` + `ForegroundService`)
 
-- **Identidad Canónica por Inodo (`computeTrackUniqueKey`)**: Cada archivo se identifica primariamente por su inodo de 64 bits (`ino:<stats.ino>`). Esto garantiza que dos enlaces duros en carpetas diferentes se reconozcan como la misma canción física.
-- **Eliminación Segura (`unlinkHardLinkAndCleanupMaster`)**: Al borrar una canción de un álbum, se ejecuta `unlink` solo sobre ese enlace duro. El archivo físico maestro en `Canciones_reales` **únicamente** se destruye si se ha eliminado el último enlace duro activo en la biblioteca.
-- **Caché en Disco de Dos Niveles**:
-  - `.library_cache.json`: Almacena rutas, `mtimeMs` y metadatos completos para arranques en frío en menos de 100 ms.
-  - `.covers/[hash].jpg`: Deduplica imágenes incrustadas mediante hash MD5, ahorrando memoria y almacenamiento.
-- **Auditoría de Salud (`hardlinksHealth.js`)**: Diagnostica enlaces huérfanos, pistas con divergencias de inodo y permite la sincronización y reparación automática desde la pestaña *Hard Links* en Ajustes.
+- **`MediaPlaybackService.java`**:
+  - Extiende `MediaSessionService` con `foregroundServiceType="mediaPlayback"`.
+  - Configura `ExoPlayer` con `C.USAGE_MEDIA`, `C.AUDIO_CONTENT_TYPE_MUSIC`, gestión automática de `AudioFocus` (`setHandleAudioBecomingNoisy(true)` al desconectar auriculares) y `C.WAKE_MODE_LOCAL` para impedir que el procesador del Motorola entre en suspensión profunda durante la reproducción.
+  - Envuelve `ExoPlayer` en un `ForwardingPlayer` que habilita permanentemente los comandos `COMMAND_SEEK_TO_NEXT`, `COMMAND_SEEK_TO_PREVIOUS`, `COMMAND_PLAY_PAUSE` y `COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM` en la pantalla de bloqueo y notificación multimedia.
+  - Embebe los bytes de la portada (`setArtworkData`) directamente en `MediaMetadata` para que `SystemUI` de Android muestre la carátula en la pantalla de bloqueo sin restricciones de permisos del directorio privado de caché.
 
-### 4.3. Ventanas Especializadas y Detección de Bordes
+### 4.3. Ecualizador Híbrido de 10 Bandas (DSP Hardware + Web Audio)
 
-- **Switches de Chromium**:
-  ```javascript
-  app.commandLine.appendSwitch('disable-renderer-backgrounding')
-  app.commandLine.appendSwitch('disable-background-timer-throttling')
-  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
-  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
-  ```
-- **Capas Z diferenciadas (Always-on-Top)**:
-  - `mainWindow`: `'pop-up-menu'`
-  - `notificationWindow`: `'screen-saver'` (Nivel 1)
-  - `sidePanel`: `'screen-saver'` (Nivel 2)
-  - `overlayWindow`: `'screen-saver'` (Nivel 1)
-- **MiniPanel Lateral Adaptativo**: Precalentado con DirectComposition mediante `showInactive()`, con hit-testing por píxel (`setIgnoreMouseEvents`) para no bloquear clics en videojuegos o aplicaciones subyacentes.
+- Las 10 bandas configurables en la interfaz (`60Hz, 170Hz, 310Hz, 600Hz, 1kHz, 3kHz, 6kHz, 12kHz, 14kHz, 16kHz`) y sus presets (*Plano, Bass Boost, Rock, Pop, Vocal, Club / Dance, Agudos*) se sincronizan en tiempo real con `android.media.audiofx.Equalizer` vinculado al `audioSessionId` de `ExoPlayer`, interpolando logarítmicamente las ganancias en decibelios a las bandas físicas del DSP del dispositivo Motorola.
 
-### 4.4. Frontend React, Estado y Rendimiento
+### 4.4. Interfaz Táctil Mobile-First y Ergonomía One-Handed
 
-- **Segregación de Contextos**:
-  - `LibraryContext`: Administra el árbol de álbumes y carpetas (solo re-renderiza ante cambios estructurales).
-  - `PlaybackContext`: Administra la pista actual, cola, volumen y estado de pausa.
-  - `PlayerTimeContext`: Gestiona el progreso en milisegundos a alta frecuencia sin provocar re-renderizados en el árbol de álbumes ni en la barra lateral.
-- **Arranque Zero-FOUC y Code Splitting**: Script en `<head>` de `index.html` aplica estilos y tema de forma síncrona antes de la carga de React. Los componentes pesados se cargan de forma diferida mediante `React.lazy` y `Suspense`.
-- **Virtualización de AlbumView**: Renderizado de listas con cálculo dinámico mediante `ResizeObserver` y *throttling* con `requestAnimationFrame` para desplazar miles de canciones a 60/144 FPS sin caídas de cuadros.
-
-### 4.5. Motor de Audio, Ecualizador y Visualizador Espectral
-
-- **Cadena Web Audio API**:
-  - Elemento HTML5 `<audio>` configurado con `latencyHint: 'playback'` para maximizar la estabilidad del búfer.
-  - Cadena de 10 filtros `BiquadFilterNode` (lowshelf en 60 Hz, 8 bandas peaking entre 170 Hz y 14 kHz, y highshelf en 16 kHz) con rampas suaves de 20 ms para evitar *clicks* acústicos.
-  - `AnalyserNode` con `fftSize = 128` (64 bandas utilizables) y suavizado de 0.60 para animar el espectro en Canvas con aceleración gravitatoria de picos.
-- **Resiliencia de Audio**: Auto-recuperación ante errores de decodificación o interrupciones, e ignorado inteligente de `MEDIA_ERR_ABORTED` en saltos continuos de pista.
+- **Navegación Inferior (`BottomNavBar.jsx`)**: Acceso con el pulgar a *Biblioteca*, *Álbum Actual*, *Buscar* y *Ajustes*, con retroalimentación háptica sutil.
+- **Reproductor Dual (`Player.jsx`)**:
+  - **MiniPlayer Flotante**: Píldora compacta sobre la barra inferior con barra de progreso superior, portada, título en marquesina, botón Play/Pause y botón Siguiente.
+  - **NowPlayingSheet**: Hoja a pantalla completa con gesto *swipe-down* para minimizar, carátula grande (o `<video>` sincronizado para pistas MP4/WebM), controles de gran tamaño (`68x68px`), letras sincronizadas integradas y modal de ecualizador.
+- **Action Sheets Táctiles (`AlbumView.jsx`)**: Menú contextual inferior por canción (`⋯`) para gestionar en qué álbumes está marcada la pista (*Bookmarks M:N*) o eliminarla del álbum actual con confirmación clara de referencias restantes.
 
 ---
 
-## 💎 Características Destacadas
+## 🧪 Suite de Pruebas Automatizadas (Vitest)
 
-1. **Gestor de Carátulas Interactivo**: Botón de engranaje (⚙️) en la cabecera de cada álbum que permite elegir la portada entre las carátulas de las canciones del álbum, persistiendo `cover.jpg` en disco con refresco inmediato.
-2. **Sistema de Marcadores (Bookmarks)**: Indicador visual en cada fila que informa en cuántos álbumes está incluida la pista, permitiendo vincularla o desvincularla con casillas de verificación en un clic.
-3. **Descarga Masiva de Letras (LRCLib)**: Descarga automática de letras sincronizadas con opción de guardado permanente en disco (`.lrc`) o reproducción temporal en memoria, con indicador reactivo de micrófono verde (`🎤`).
-4. **Game Overlay HUD**: Panel flotante semitransparente con arrastre libre, controles de reproducción y rueda de volumen que no roba el foco de juegos a pantalla completa.
-5. **Spotlight Search (`Ctrl+K` / `Ctrl+F`)**: Modal de búsqueda instantánea por título, artista o álbum con resaltado interactivo y navegación por teclado.
-6. **Integración con Extractor de Audio**: Modal que detecta automáticamente enlaces de YouTube, Spotify o TikTok desde el portapapeles y lanza el descargador externo.
-
----
-
-## ⌨️ Atajos de Teclado y Control Global
-
-### Atajos Globales de Windows (configurables en Ajustes o en `src/main/hotkeys.js`):
-- `Ctrl + Flecha Derecha` / `Ctrl + Alt + Flecha Derecha` / `MediaNextTrack`: Pista siguiente.
-- `Ctrl + Flecha Izquierda` / `Ctrl + Alt + Flecha Izquierda` / `MediaPreviousTrack`: Pista anterior.
-- `Ctrl + Espacio` / `Ctrl + Shift + Espacio` / `MediaPlayPause`: Reproducir / Pausar.
-- `Ctrl + Flecha Arriba` / `Ctrl + Alt + Flecha Arriba`: Subir volumen (+5%).
-- `Ctrl + Flecha Abajo` / `Ctrl + Alt + Flecha Abajo`: Bajar volumen (-5%).
-- `Ctrl + Shift + M` / `Ctrl + Alt + M`: Mostrar / ocultar el MiniPanel lateral.
-- `Ctrl + Shift + R` / `Ctrl + Alt + R`: Restaurar o enfocar la ventana principal.
-- `Ctrl + Shift + F` / `Ctrl + Alt + F` / `Ctrl + Shift + T`: Fijar / soltar ventana principal en primer plano.
-- `Ctrl + Alt + H` / `Ctrl + Shift + H`: Mostrar / ocultar el Game Overlay HUD.
-
-### Atajos en la Ventana Principal:
-- `Espacio`: Reproducir / Pausar.
-- `Ctrl + K` o `Ctrl + F`: Abrir Buscador Spotlight.
-- `Flecha Arriba` / `Flecha Abajo`: Subir o bajar volumen (+/- 5%).
-- `Escape`: Cerrar modales, menús contextuales, Spotlight o panel de letras.
-
----
-
-## 🧪 Suite de Pruebas Automatizadas
-
-El proyecto cuenta con 17 pruebas unitarias ejecutadas mediante **Vitest**, validando los módulos compartidos de dominio (`src/shared/lyricsParser.ts`, `src/shared/shuffle.ts`) y los servicios de seguridad utilizados directamente en producción:
+El proyecto incluye **23 pruebas automatizadas** en 4 suites que verifican la lógica de dominio, seguridad y el motor relacional de la bóveda:
 
 ```bash
-# Ejecutar todas las pruebas unitarias
+# Ejecutar todas las pruebas unitarias y de bóveda relacional
 npm test
 
-# Modo observador continuo durante desarrollo
-npm run test:watch
+# Comprobar tipos de TypeScript en todo el proyecto
+npm run typecheck
 ```
 
-Cobertura actual:
-- **`test/shuffle.test.ts`**: Valida que el algoritmo Fisher-Yates no repita canciones dentro de un mismo ciclo, conserve la totalidad de los elementos y baraje de forma equiprobable.
-- **`test/security.test.ts`**: Comprueba la sanitización de nombres de archivo reservados en Windows y la prevención de ataques de Path Traversal hacia directorios del sistema.
-- **`test/lyrics.test.ts`**: Verifica el análisis y sincronización de letras LRC (marcas `[mm:ss.xx]`), descarte de metadatos no musicales y orden cronológico.
+- **`test/vault.test.ts`**: Verifica importación en la bóveda, asignación `M:N` a múltiples álbumes sin duplicar el archivo físico, preservación del archivo maestro al borrarlo de un solo álbum (`remainingReferences > 0`), borrado físico automático al eliminar la última referencia (`remainingReferences === 0`) y auditoría/compactación de salud de la bóveda.
+- **`test/lyrics.test.ts`**: Verifica el parser de letras sincronizadas LRC.
+- **`test/security.test.ts`**: Verifica la sanitización de nombres y bloqueo de Path Traversal.
+- **`test/shuffle.test.ts`**: Verifica el barajado Fisher-Yates sin repetición cíclica.
 
 ---
 
-## 💻 Instalación y Comandos de Compilación
+## 🚀 Guía Paso a Paso: Compilación y Despliegue en Motorola
 
 ### Requisitos Previos
-- **Node.js**: Versión 18 o superior.
-- **npm**: Gestor de paquetes incluido con Node.js.
-- **Sistema Operativo**: Windows 10 u 11 (requerido para soporte de Hard Links NTFS, DirectComposition y SMTC).
+- **Node.js** 18+ y **npm**.
+- **Android Studio** (Iguana / Jellyfish / Koala o superior) con **Android SDK Platform 34** y **JDK 17+**.
+- En tu **Motorola**: Activar *Opciones de desarrollador* y habilitar **Depuración por USB**.
 
-### Comandos de Ejecución
+### Comandos Principales
 
 ```bash
-# 1. Instalar dependencias
+# 1. Instalar dependencias del proyecto
 npm install
 
-# 2. Iniciar en modo desarrollo con Hot-Reloading
+# 2. Ejecutar en modo desarrollo Web (vista previa rápida en navegador)
 npm run dev
 
-# 3. Comprobar tipos TypeScript
-npm run typecheck
+# 3. Compilar la aplicación Web y sincronizar assets + plugins con Android
+npm run cap:sync
 
-# 4. Ejecutar suite de pruebas
-npm test
+# 4. Abrir el proyecto nativo en Android Studio para compilar APK o depurar en el Motorola
+npm run cap:open
 
-# 5. Compilar código para producción
-npm run build
-
-# 6. Empaquetar instalador y versión portable (distribución completa)
-npm run dist
-
-# 7. Crear acceso directo en el Escritorio
-npm run shortcut:desktop
-
-# 8. Generar icono .ico multirresolución
-npm run icons:generate
+# 5. Compilar y ejecutar directamente en el Motorola conectado por USB
+npm run android:run
 ```
 
-> [!NOTE]
-> El comando `npm run dist` ejecuta `electron-vite build`, `electron-builder` para Windows (generando instalador NSIS y versión portable de 64 bits) y corre `scripts/update_compiled_app.ps1`, dejando los ejecutables organizados en `Aplicacion_Compilada/`.
-
----
-
-## 📄 Licencia
-
-Proyecto de reproductor de música personal de alto rendimiento para escritorio. Todos los derechos reservados.
+### Flujo en Android Studio para instalar en el Motorola
+1. Ejecuta `npm run cap:sync` y luego `npm run cap:open`.
+2. Conecta tu teléfono **Motorola** por cable USB (o mediante *Wireless Debugging*) y acepta la huella RSA de depuración en la pantalla del teléfono.
+3. En la barra superior de Android Studio, selecciona tu dispositivo **Motorola** y pulsa el botón verde **Run ('app')** (`Shift + F10`), o genera el instalador desde **Build > Build Bundle(s) / APK(s) > Build APK(s)**.
+4. Al abrir la app en el Motorola, acepta el permiso de notificaciones para visualizar los controles multimedia en la pantalla de bloqueo y cortina de notificaciones.

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SecurityService } from '../src/main/services/SecurityService'
-import path from 'path'
+import { SecurityService } from '../src/shared/security'
 
 describe('SecurityService - Sanitización y Validación de Rutas', () => {
   const allowedRoots = [

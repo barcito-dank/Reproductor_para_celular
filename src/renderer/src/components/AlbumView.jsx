@@ -2,8 +2,10 @@ import { usePlayer } from '../context/PlayerContext'
 import React, { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
 import { areSameTrack } from '../utils/trackUtils'
+import { triggerHaptic } from './BottomNavBar'
 
-const ALBUM_ROW_HEIGHT = 63 // 60px alto de fila + 3px margen inferior
+const ROW_HEIGHT = 60 // Estándar táctil móvil >= 48px (60px alto de fila)
+const ALBUM_ROW_HEIGHT = ROW_HEIGHT + 3 // 60px alto de fila + 3px margen inferior
 const ALBUM_OVERSCAN = 18 // Margen aumentado para pre-cargar y decodificar imágenes antes de entrar en viewport
 
 function formatTime(seconds) {
@@ -78,8 +80,13 @@ const TrackRow = React.memo(function TrackRow({
   onContextMenuTrack,
   onStartTrackDrag
 }) {
+  const longPressTimerRef = useRef(null)
+  const longPressTriggeredRef = useRef(false)
+  const touchStartPosRef = useRef(null)
+
   const handleBookmarkClick = (e) => {
     e.stopPropagation()
+    void triggerHaptic()
     const rect = e.currentTarget.getBoundingClientRect()
     onOpenAlbumPicker(track, {
       x: rect.right,
@@ -89,23 +96,89 @@ const TrackRow = React.memo(function TrackRow({
     })
   }
 
+  const handleMoreMenuClick = (e) => {
+    e.stopPropagation()
+    void triggerHaptic()
+    const rect = e.currentTarget.getBoundingClientRect()
+    onContextMenuTrack(track, { x: rect.left, y: rect.bottom + 6 }, index)
+  }
+
   const handleRowContextMenu = (e) => {
     e.preventDefault()
     e.stopPropagation()
-    onContextMenuTrack(track, { x: e.clientX, y: e.clientY })
+    void triggerHaptic()
+    onContextMenuTrack(track, { x: e.clientX, y: e.clientY }, index)
   }
+
+  // Pulsación larga táctil (450ms) cancelada si el usuario desliza para hacer scroll
+  const handleTouchStart = (e) => {
+    if (e.target.closest('button, input')) return
+    longPressTriggeredRef.current = false
+    const touch = e.touches?.[0]
+    if (!touch) return
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY }
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null
+      longPressTriggeredRef.current = true
+      void triggerHaptic()
+      onContextMenuTrack(track, { x: touch.clientX, y: touch.clientY }, index)
+    }, 450)
+  }
+
+  const handleTouchMove = (e) => {
+    if (!longPressTimerRef.current || !touchStartPosRef.current) return
+    const touch = e.touches?.[0]
+    if (!touch) return
+    const dist = Math.hypot(
+      touch.clientX - touchStartPosRef.current.x,
+      touch.clientY - touchStartPosRef.current.y
+    )
+    if (dist > 10) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const clearLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const handleRowClick = (e) => {
+    if (e.target.closest('button, input')) return
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false
+      return
+    }
+    void triggerHaptic()
+    onSelectTrack(track, index)
+  }
+
+  const isVideo = track.mediaType === 'video'
 
   const bookmarkTooltip =
     albumCount > 1
-      ? `Presente en ${albumCount} álbumes (${albumNamesText}) · Clic para agregar a otros álbumes`
-      : `Presente en 1 álbum (${albumNamesText || track.albumName || 'Actual'}) · Clic para agregar a otros álbumes`
+      ? `Presente en ${albumCount} álbumes (${albumNamesText}) · Toca para gestionar álbumes`
+      : `Presente en 1 álbum (${albumNamesText || track.albumName || 'Actual'}) · Toca para agregar a otros álbumes`
 
   return (
     <li
       className={`track-item ${isActive ? 'active' : ''} ${isDraggingThisTrack ? 'is-dragging-source' : ''}`}
-      onPointerDown={(e) => onStartTrackDrag?.(e, track, index)}
+      style={{ minHeight: `${ROW_HEIGHT}px` }}
+      onPointerDown={(e) => {
+        if (e.pointerType === 'touch') return
+        onStartTrackDrag?.(e, track, index)
+      }}
+      onClick={handleRowClick}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={clearLongPress}
+      onTouchCancel={clearLongPress}
       onContextMenu={handleRowContextMenu}
-      title="Clic para reproducir · Arrastra a cualquier álbum para agregarlo"
+      title="Toca para reproducir · Mantén presionado o usa ⋮ para más acciones"
     >
       {/* Número o Indicador de Ecualizador Animado */}
       <div className="track-number">
@@ -119,7 +192,7 @@ const TrackRow = React.memo(function TrackRow({
         )}
       </div>
 
-      {/* Miniatura de la Imagen de la Canción con Hover Play */}
+      {/* Miniatura de la Imagen de la Canción */}
       <div className="track-cover-container">
         {track.cover ? (
           <React.Fragment key={track.cover}>
@@ -134,10 +207,12 @@ const TrackRow = React.memo(function TrackRow({
                 if (fb) fb.style.display = 'flex'
               }}
             />
-            <div className="track-thumb-fallback" style={{ display: 'none' }}>🎵</div>
+            <div className="track-thumb-fallback" style={{ display: 'none' }}>
+              {isVideo ? '🎬' : '🎵'}
+            </div>
           </React.Fragment>
         ) : (
-          <div className="track-thumb-fallback">🎵</div>
+          <div className="track-thumb-fallback">{isVideo ? '🎬' : '🎵'}</div>
         )}
         <div className="track-thumb-hover-overlay">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -150,6 +225,7 @@ const TrackRow = React.memo(function TrackRow({
       <div className="track-info">
         <div className="track-title-row">
           <div className="track-title" title={track.title}>{track.title}</div>
+          {isVideo && <span className="track-video-pill">🎬</span>}
         </div>
         <div className="track-artist-row">
           <div className="track-artist" title={track.artist}>{track.artist}</div>
@@ -168,11 +244,12 @@ const TrackRow = React.memo(function TrackRow({
         </div>
       </div>
 
-      {/* Botón de Marcador / Álbumes con casillas */}
+      {/* Botón de Marcador / Álbumes siempre visible en móvil */}
       <button
         type="button"
         className={`track-bookmark-btn ${albumCount > 1 ? 'in-multiple' : ''} ${isAlbumPickerOpen ? 'open' : ''}`}
         onClick={handleBookmarkClick}
+        onPointerDown={(e) => e.stopPropagation()}
         title={bookmarkTooltip}
         aria-label="Gestionar álbumes de esta canción"
       >
@@ -182,6 +259,18 @@ const TrackRow = React.memo(function TrackRow({
 
       {/* Duración */}
       <span className="track-duration">{formatTime(track.duration)}</span>
+
+      {/* Botón táctil de 3 puntos (⋮) siempre visible en móvil */}
+      <button
+        type="button"
+        className="track-more-btn"
+        onClick={handleMoreMenuClick}
+        onPointerDown={(e) => e.stopPropagation()}
+        title="Acciones de canción"
+        aria-label={`Opciones para ${track.title}`}
+      >
+        ⋮
+      </button>
     </li>
   )
 })
@@ -414,9 +503,11 @@ function AlbumMembershipPopover({
 
 function TrackContextMenu({
   track,
+  trackIndex = 0,
   position,
   onClose,
-  onOpenFolder,
+  onPlayNow,
+  onOpenLyrics,
   onOpenAlbumPicker,
   onCopyTitle,
   onCopyArtist,
@@ -427,150 +518,205 @@ function TrackContextMenu({
   const menuRef = useRef(null)
 
   useEffect(() => {
-    const handlePointerDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) {
-        onClose()
-      }
-    }
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') onClose()
     }
-    document.addEventListener('pointerdown', handlePointerDown)
     window.addEventListener('keydown', handleKeyDown)
     return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [onClose])
 
-  const menuWidth = 235
-  const menuHeight = 225
-  const winW = typeof window !== 'undefined' ? window.innerWidth : 1200
-  const winH = typeof window !== 'undefined' ? window.innerHeight : 800
-
-  let left = position.x
-  if (left + menuWidth > winW - 12) {
-    left = Math.max(12, position.x - menuWidth)
-  }
-  let top = position.y
-  if (top + menuHeight > winH - 65) {
-    top = Math.max(12, position.y - menuHeight)
-  }
+  const albumCount = albumInfo?.albumCount || track?.albumCount || 1
 
   const content = (
     <div
-      ref={menuRef}
-      className="track-context-menu"
-      style={{ left: `${left}px`, top: `${top}px` }}
-      role="menu"
-      onClick={(e) => e.stopPropagation()}
+      className="mobile-action-sheet-backdrop"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Acciones para ${track.title}`}
     >
-      <button
-        type="button"
-        className="track-context-item"
-        onClick={() => {
-          onOpenFolder(track)
-          onClose()
-        }}
+      <div
+        ref={menuRef}
+        className="mobile-action-sheet"
+        onClick={(e) => e.stopPropagation()}
       >
-        <span className="track-context-icon">📂</span>
-        <span>Abrir</span>
-        <span className="track-context-sub">Ubicación</span>
-      </button>
+        <div className="mobile-action-sheet-handle" />
 
-      <button
-        type="button"
-        className="track-context-item"
-        onClick={() => {
-          onClose()
-          onOpenAlbumPicker(track, {
-            x: left + menuWidth,
-            anchorRight: left + menuWidth,
-            y: top,
-            anchorTop: top
-          })
-        }}
-      >
-        <span className="track-context-icon">🔖</span>
-        <span>Agregar</span>
-        <span className="track-context-sub">A álbumes</span>
-      </button>
-
-      <div className="track-context-sep" />
-
-      {/* Fila compacta: Copiar: Título / Artista */}
-      <div className="track-context-copy-row">
-        <span className="track-context-copy-label">Copiar:</span>
-        <div className="track-context-copy-buttons">
+        {/* Cabecera con miniatura e información de la canción */}
+        <div className="mobile-action-sheet-header">
+          {track.cover ? (
+            <img src={track.cover} alt="" className="mobile-action-sheet-cover" />
+          ) : (
+            <div className="mobile-action-sheet-cover-placeholder">
+              {track.mediaType === 'video' ? '🎬' : '🎵'}
+            </div>
+          )}
+          <div className="mobile-action-sheet-meta">
+            <div className="mobile-action-sheet-title">{track.title}</div>
+            <div className="mobile-action-sheet-sub">
+              {track.artist || 'Artista desconocido'} · En {albumCount}{' '}
+              {albumCount === 1 ? 'álbum' : 'álbumes'}
+            </div>
+          </div>
           <button
             type="button"
-            className="track-copy-pill-btn"
-            onClick={() => {
-              onCopyTitle(track)
-              onClose()
-            }}
-            title="Copiar título"
+            className="track-modal-close"
+            onClick={onClose}
+            aria-label="Cerrar menú"
           >
-            Título
+            ✕
           </button>
-          <span className="track-copy-slash">/</span>
+        </div>
+
+        {/* Lista de Acciones Táctiles */}
+        <div className="mobile-action-sheet-list">
           <button
             type="button"
-            className="track-copy-pill-btn"
+            className="mobile-action-item primary"
             onClick={() => {
-              onCopyArtist(track)
+              void triggerHaptic()
+              onPlayNow?.(track, trackIndex)
               onClose()
             }}
-            title="Copiar artista"
           >
-            Artista
+            <span className="mobile-action-icon">▶️</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Reproducir ahora</span>
+              <span className="mobile-action-desc">Iniciar reproducción inmediata en este álbum</span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-action-item"
+            onClick={() => {
+              void triggerHaptic()
+              const anchorX = position?.x ?? window.innerWidth / 2
+              const anchorY = position?.y ?? window.innerHeight / 3
+              onClose()
+              onOpenAlbumPicker(track, {
+                x: anchorX,
+                anchorRight: anchorX,
+                y: anchorY,
+                anchorTop: anchorY
+              })
+            }}
+          >
+            <span className="mobile-action-icon">🔖</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Gestionar en qué álbumes está</span>
+              <span className="mobile-action-desc">
+                Vincular o desvincular en múltiples álbumes (actualmente en {albumCount})
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-action-item"
+            onClick={() => {
+              void triggerHaptic()
+              onOpenLyrics?.(track, trackIndex)
+              onClose()
+            }}
+          >
+            <span className="mobile-action-icon">🎤</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Ver / Descargar letra sincronizada (.lrc)</span>
+              <span className="mobile-action-desc">
+                {track.hasLyrics
+                  ? 'Letra disponible · Abrir vista karaoke'
+                  : 'Buscar letra sincronizada en LRCLIB'}
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-action-item"
+            onClick={() => {
+              void triggerHaptic()
+              onOpenProperties(track)
+              onClose()
+            }}
+          >
+            <span className="mobile-action-icon">✏️</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Editar título / artista (Tags) o Propiedades</span>
+              <span className="mobile-action-desc">Modificar metadatos en la bóveda SQLite</span>
+            </div>
+          </button>
+
+          <div className="track-context-copy-row" style={{ padding: '8px 14px' }}>
+            <span className="track-context-copy-label">Copiar rápido:</span>
+            <div className="track-context-copy-buttons">
+              <button
+                type="button"
+                className="track-copy-pill-btn"
+                onClick={() => {
+                  onCopyTitle(track)
+                  onClose()
+                }}
+              >
+                Título
+              </button>
+              <span className="track-copy-slash">/</span>
+              <button
+                type="button"
+                className="track-copy-pill-btn"
+                onClick={() => {
+                  onCopyArtist(track)
+                  onClose()
+                }}
+              >
+                Artista
+              </button>
+            </div>
+          </div>
+
+          <div className="track-context-sep" />
+
+          <button
+            type="button"
+            className="mobile-action-item warning"
+            onClick={() => {
+              void triggerHaptic()
+              onRequestDelete(track, 'single')
+              onClose()
+            }}
+          >
+            <span className="mobile-action-icon">🗑️</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Quitar de este álbum</span>
+              <span className="mobile-action-desc">
+                {albumCount > 1
+                  ? 'Solo borra el vínculo en SQLite; se conserva en tus otros álbumes'
+                  : 'Es su único álbum: pedirá confirmación antes de borrar'}
+              </span>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-action-item danger"
+            onClick={() => {
+              void triggerHaptic()
+              onRequestDelete(track, 'all')
+              onClose()
+            }}
+          >
+            <span className="mobile-action-icon">💥</span>
+            <div className="mobile-action-text">
+              <span className="mobile-action-label">Eliminar definitivamente del dispositivo</span>
+              <span className="mobile-action-desc">
+                Borra de todos los álbumes ({albumCount}) y elimina el archivo de app_vault/tracks/
+              </span>
+            </div>
           </button>
         </div>
       </div>
-
-      <div className="track-context-sep" />
-
-      <button
-        type="button"
-        className="track-context-item"
-        onClick={() => {
-          onOpenProperties(track)
-          onClose()
-        }}
-      >
-        <span className="track-context-icon">✏️</span>
-        <span>Editar</span>
-        <span className="track-context-sub">Etiquetas</span>
-      </button>
-
-      <button
-        type="button"
-        className="track-context-item danger"
-        onClick={() => {
-          onRequestDelete(track, 'single')
-          onClose()
-        }}
-      >
-        <span className="track-context-icon">🗑️</span>
-        <span>Eliminar</span>
-        <span className="track-context-sub">{albumInfo?.albumCount > 1 ? 'De este álbum' : ''}</span>
-      </button>
-
-      <button
-        type="button"
-        className="track-context-item danger"
-        onClick={() => {
-          onRequestDelete(track, 'all')
-          onClose()
-        }}
-        title="Eliminar esta canción de todos los álbumes donde exista"
-      >
-        <span className="track-context-icon">💥</span>
-        <span>Eliminar de todos los álbumes</span>
-        {albumInfo?.albumCount > 1 && (
-          <span className="track-context-sub">{albumInfo.albumCount} alb.</span>
-        )}
-      </button>
     </div>
   )
 
@@ -885,22 +1031,22 @@ function DeleteTrackConfirmModal({ target, onCancel, onConfirm, isDeleting }) {
           <p className="track-delete-warning">
             {isAllMode ? (
               <>
-                Se eliminarán <strong>todos los enlaces duros (Hard Links)</strong> de esta canción en la biblioteca
-                {albumNames.length > 0 && ` (${albumNames.join(', ')})`}. Al no quedar ningún enlace activo en{' '}
-                <code>canciones_organizadas</code>, <strong>también se eliminará definitivamente el archivo original en <code>Canciones_reales</code></strong>:
+                Se eliminarán <strong>todos los vínculos</strong> de esta pista en la biblioteca SQLite
+                {albumNames.length > 0 && ` (${albumNames.join(', ')})`} y{' '}
+                <strong>se borrará definitivamente el archivo físico en <code>app_vault/tracks/</code></strong>:
               </>
             ) : isLastAlbum ? (
               <>
-                Esta canción solo tiene enlace en el álbum{' '}
+                Esta pista solo pertenece al álbum{' '}
                 <strong>&ldquo;{album?.name || track.albumName || 'este álbum'}&rdquo;</strong>.
-                Al tratarse de su <strong>último enlace duro</strong> en <code>canciones_organizadas</code>, se eliminará este enlace y{' '}
-                <strong>también se eliminará definitivamente el archivo original en <code>Canciones_reales</code></strong>:
+                Al tratarse de su <strong>último vínculo</strong> en la bóveda, se eliminará de este álbum y{' '}
+                <strong>también se borrará definitivamente el archivo en <code>app_vault/tracks/</code></strong>:
               </>
             ) : (
               <>
-                Se eliminará únicamente el <strong>enlace duro (Hard Link)</strong> de esta canción en la carpeta de{' '}
-                <strong>&ldquo;{album?.name || 'este álbum'}&rdquo;</strong> (<code>fs.unlink</code>).{' '}
-                <strong>No se tocará el archivo original en <code>Canciones_reales</code></strong> y la canción seguirá disponible en los demás álbumes:
+                Se quitará únicamente el <strong>vínculo en SQLite</strong> de esta pista dentro del álbum{' '}
+                <strong>&ldquo;{album?.name || 'este álbum'}&rdquo;</strong>.{' '}
+                <strong>No se borrará el archivo en <code>app_vault/tracks/</code></strong> y la canción seguirá disponible en tus demás álbumes:
               </>
             )}
           </p>
@@ -1178,6 +1324,7 @@ function AlbumView() {
     deleteTrackFromAllAlbums,
     updateTrackTags,
     changeAlbumCover,
+    importFilesToVault,
     playAlbum,
     playTrack,
     currentTrack,
@@ -1236,10 +1383,22 @@ function AlbumView() {
     )
   }, [])
 
-  const handleOpenContextMenu = useCallback((track, position) => {
+  const handleOpenContextMenu = useCallback((track, position, index = 0) => {
     setAlbumPickerState(null)
-    setContextMenuState({ track, position })
+    setContextMenuState({ track, position, index })
   }, [])
+
+  const handleImportToCurrentAlbum = useCallback(async () => {
+    void triggerHaptic()
+    const targetId =
+      selectedAlbum && !selectedAlbum.isAllTracks ? selectedAlbum.id : undefined
+    const res = await importFilesToVault?.(targetId)
+    if (res && res.success && res.importedCount > 0) {
+      showFeedback(
+        `✓ ${res.importedCount} ${res.importedCount === 1 ? 'archivo importado' : 'archivos importados'} a la bóveda`
+      )
+    }
+  }, [selectedAlbum, importFilesToVault, showFeedback])
 
   const handleSaveTrackTags = useCallback(async (track, newTags) => {
     const res = await updateTrackTags(track, newTags)
@@ -1603,8 +1762,6 @@ function AlbumView() {
       isDraggingTrackRef.current = false
 
       if (!didDrag) {
-        // Clic simple: reproducir la pista
-        handleSelectTrack(track, index)
         return
       }
 
@@ -1680,12 +1837,21 @@ function AlbumView() {
     return (
       <div className="welcome-view">
         <div className="welcome-icon">🎵</div>
-        <h2>Bienvenido a tu Música</h2>
+        <h2>Bienvenido a tu Bóveda Musical</h2>
         <p>
           {library.length === 0
-            ? 'No se encontraron canciones en "C:\\Users\\barre\\Music\\canciones_organizadas".'
-            : 'Selecciona una categoría o álbum de la barra lateral para ver todas sus canciones con sus respectivas carátulas.'}
+            ? 'Tu bóveda SQLite aún no tiene pistas. Importa música o videos desde tu teléfono para empezar.'
+            : 'Selecciona un álbum en la pestaña Álbumes o importa nuevas canciones directamente a tu bóveda.'}
         </p>
+        <button
+          type="button"
+          className="import-vault-btn prominent"
+          style={{ marginTop: '18px' }}
+          onClick={handleImportToCurrentAlbum}
+        >
+          <span>📥</span>
+          <span>+ Importar Música / Video</span>
+        </button>
       </div>
     )
   }
@@ -1755,6 +1921,15 @@ function AlbumView() {
                 <path d="M8 5v14l11-7z" />
               </svg>
               Reproducir Álbum
+            </button>
+
+            <button
+              type="button"
+              className="import-vault-btn"
+              onClick={handleImportToCurrentAlbum}
+              title="Añadir música o videos desde tu dispositivo a este álbum en la bóveda SQLite"
+            >
+              <span>+ Importar Música / Video</span>
             </button>
           </div>
         </div>
@@ -1899,8 +2074,16 @@ function AlbumView() {
             <div className="album-empty-icon">📁</div>
             <h3>Este álbum está vacío</h3>
             <p>
-              Puedes agregar canciones desde cualquier otro álbum haciendo clic en el botón de marcador <strong>🔖</strong> o haciendo clic derecho en una canción y seleccionando <strong>Agregar</strong>.
+              Importa canciones o videos desde tu dispositivo o usa el botón de marcador <strong>🔖</strong> en cualquier pista para asignarla aquí.
             </p>
+            <button
+              type="button"
+              className="import-vault-btn"
+              style={{ marginTop: '14px' }}
+              onClick={handleImportToCurrentAlbum}
+            >
+              + Importar Música / Video
+            </button>
           </div>
         )}
       </ul>
@@ -1921,13 +2104,22 @@ function AlbumView() {
         />
       )}
 
-      {/* Menú Contextual (Clic Derecho en cualquier canción) */}
+      {/* Mobile Action Sheet (Menú de 3 puntos ⋮ o Pulsación Larga) */}
       {contextMenuState && (
         <TrackContextMenu
           track={contextMenuState.track}
+          trackIndex={contextMenuState.index ?? 0}
           position={contextMenuState.position}
           onClose={() => setContextMenuState(null)}
-          onOpenFolder={handleOpenInFolder}
+          onPlayNow={(t, idx) => handleSelectTrack(t, idx)}
+          onOpenLyrics={(t, idx) => {
+            if (!areSameTrack(currentTrack, t, false)) {
+              handleSelectTrack(t, idx)
+            }
+            window.dispatchEvent(
+              new CustomEvent('open-now-playing', { detail: { tab: 'lyrics' } })
+            )
+          }}
           onOpenAlbumPicker={handleOpenAlbumPicker}
           onCopyTitle={handleCopyTitle}
           onCopyArtist={handleCopyArtist}
@@ -1938,15 +2130,11 @@ function AlbumView() {
             const isSingleMode = mode === 'single'
             const isVirtualAll = Boolean(selectedAlbum?.isAllTracks)
 
-            // Eliminación simple de solo un álbum: si la canción existe en 2 o más álbumes y estamos en un álbum específico,
-            // no necesita confirmación; se quita de inmediato del álbum actual.
             if (isSingleMode && count > 1 && !isVirtualAll && selectedAlbum) {
               handleRemoveTrackFromSingleAlbum(t, selectedAlbum)
               return
             }
 
-            // Requiere confirmación si es su único enlace en la biblioteca (se borraría de Canciones_reales),
-            // o si estamos en la vista global "Todos", o si se eligió explícitamente "Eliminar de todos los álbumes".
             setDeleteTargetTrack({
               track: t,
               album: selectedAlbum,

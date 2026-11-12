@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { getTrackUniqueKey, TODOS_ALBUM_COVER } from '../utils/trackUtils'
 import { buildShuffledIndices } from '@shared/shuffle'
+import { nativeAudioSync } from '../services/NativeAudioBridge'
 
 const LibraryContext = createContext(null)
 const PlaybackContext = createContext(null)
@@ -20,6 +21,25 @@ export const EQ_PRESETS = {
 }
 
 const SESSION_STORAGE_KEY = 'musicPlayerSessionState'
+const DEFAULT_VAULT_DIRECTORY = 'app_vault'
+
+function isLegacyWindowsPath(dir) {
+  if (!dir || typeof dir !== 'string') return false
+  return /^[a-zA-Z]:[\\/]/.test(dir) || dir.startsWith('\\\\')
+}
+
+function resolveInitialMusicDirectory() {
+  try {
+    const saved = window.localStorage.getItem('musicPlayerDirectory')
+    if (!saved || isLegacyWindowsPath(saved)) {
+      window.localStorage.setItem('musicPlayerDirectory', DEFAULT_VAULT_DIRECTORY)
+      return DEFAULT_VAULT_DIRECTORY
+    }
+    return saved
+  } catch (_) {
+    return DEFAULT_VAULT_DIRECTORY
+  }
+}
 
 function loadSavedSession() {
   try {
@@ -36,6 +56,7 @@ function resolveAudioSrc(track) {
   if (!track) return ''
   if (track.fileUrl) return track.fileUrl
   const normalized = (track.path || '').replace(/\\/g, '/')
+  if (/^(https?|blob|data|capacitor):/i.test(normalized)) return normalized
   const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
   return encodeURI(fileUrl).replace(/#/g, '%23')
 }
@@ -179,6 +200,7 @@ function buildDerivedLibraryData(rawNodes) {
 export function PlayerProvider({ children, isMiniPanel = false }) {
   // Instanciar HTMLAudioElement una sola vez y únicamente en la ventana principal
   const audioRef = useRef(null)
+  const videoRef = useRef(null)
   if (!isMiniPanel && !audioRef.current && typeof Audio !== 'undefined') {
     const audio = new Audio()
     audio.preload = 'auto'
@@ -210,9 +232,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   }) // 'none' | 'all' | 'one'
   const [isLoading, setIsLoading] = useState(true)
   const [selectedAlbum, setSelectedAlbum] = useState(null)
-  const [musicDirectory, setMusicDirectory] = useState(() => (
-    window.localStorage.getItem('musicPlayerDirectory') || ''
-  ))
+  const [musicDirectory, setMusicDirectory] = useState(() => resolveInitialMusicDirectory())
 
   // Estructura derivada memoizada en un único bloque coherente
   const {
@@ -226,11 +246,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   const lastTimeSyncRef = useRef(0)
   const lastSentPlaylistRef = useRef(null)
 
-  // Cargar biblioteca de música y restaurar sesión atómicamente en un único lote de renderizado
-  const loadLibrary = useCallback(async (directory = window.localStorage.getItem('musicPlayerDirectory') || undefined) => {
+  // Cargar biblioteca de música desde la bóveda móvil y restaurar sesión atómicamente
+  const loadLibrary = useCallback(async (directory) => {
     setIsLoading(true)
+    const rawDir = directory ?? window.localStorage.getItem('musicPlayerDirectory') ?? DEFAULT_VAULT_DIRECTORY
+    const effectiveDir = !rawDir || isLegacyWindowsPath(rawDir) ? DEFAULT_VAULT_DIRECTORY : rawDir
     try {
-      const tree = await window.electronAPI.scanMusic(directory)
+      const tree = await window.electronAPI.scanMusic(effectiveDir)
       const normalizedTree = tree || []
 
       if (!isMiniPanel && !sessionRestoredRef.current && normalizedTree.length > 0) {
@@ -283,17 +305,31 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
             }
             setCurrentTime(restoredTime)
 
+            const resolvedUrl = resolveAudioSrc(foundTrack)
             const audio = audioRef.current
             if (audio) {
               pendingRestoreSeekRef.current = restoredTime
-              audio.src = resolveAudioSrc(foundTrack)
+              audio.src = resolvedUrl
               if (restoredTime > 0) {
                 try {
                   audio.currentTime = restoredTime
                 } catch (_) {}
               }
             }
-            window.electronAPI.sendPlayerTime?.(restoredTime)
+            void nativeAudioSync.loadTrack({
+              id: foundTrack.id,
+              url: resolvedUrl,
+              filePath: foundTrack.filePath || foundTrack.path || '',
+              title: foundTrack.title || 'Canción',
+              artist: foundTrack.artist || 'Artista Desconocido',
+              album: resolvedAlbum?.name || foundTrack.albumName || foundTrack.album || '',
+              coverUrl: foundTrack.cover || undefined,
+              duration: foundTrack.duration || 0,
+              autoPlay: false
+            })
+            if (restoredTime > 0) {
+              void nativeAudioSync.seekTo(restoredTime)
+            }
             restoredTrackApplied = true
           }
         }
@@ -310,15 +346,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
     setIsLoading(false)
     if (!isMiniPanel) {
-      // Doble requestAnimationFrame garantiza que React 18 haya aplicado el árbol al DOM
-      // y Chromium haya compuesto el fotograma final antes de revelar la ventana al usuario
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.electronAPI?.notifyRendererReady?.()
         })
       })
     }
-  }, [isMiniPanel]) // NUNCA se vuelve a ejecutar al seleccionar un álbum
+  }, [isMiniPanel])
 
   // Sincronizar álbum seleccionado y cola activa ante actualizaciones posteriores de la biblioteca (Watcher, edición, etc.)
   useEffect(() => {
@@ -362,7 +396,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     })
   }, [isMiniPanel, library, allTracksAlbum, allAlbums])
 
-  // Precargar cola de reproducción inicial cuando aún no suena ninguna pista para sincronizar el MiniPanel desde el arranque
+  // Precargar cola de reproducción inicial cuando aún no suena ninguna pista
   useEffect(() => {
     if (isMiniPanel) return
     if (!currentTrack && selectedAlbum?.tracks?.length > 0) {
@@ -372,12 +406,46 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   }, [isMiniPanel, currentTrack, selectedAlbum])
 
   const updateMusicDirectory = useCallback(async (directory) => {
-    window.localStorage.setItem('musicPlayerDirectory', directory)
-    setMusicDirectory(directory)
+    const normalized = !directory || isLegacyWindowsPath(directory) ? DEFAULT_VAULT_DIRECTORY : directory
+    window.localStorage.setItem('musicPlayerDirectory', normalized)
+    setMusicDirectory(normalized)
     setSelectedAlbum(null)
     sessionRestoredRef.current = false
-    await loadLibrary(directory)
+    await loadLibrary(normalized)
   }, [loadLibrary])
+
+  /**
+   * Importa archivos de audio o video directamente a la bóveda móvil (`app_vault`)
+   * y refresca el árbol de biblioteca inmediatamente.
+   */
+  const importFilesToVault = useCallback(async (targetAlbumIdOrOptions, maybeFiles) => {
+    if (!window.electronAPI?.importMediaFiles) {
+      return { success: false, importedCount: 0 }
+    }
+    try {
+      let options = {}
+      if (typeof targetAlbumIdOrOptions === 'string') {
+        options = { albumId: targetAlbumIdOrOptions, files: maybeFiles }
+      } else if (targetAlbumIdOrOptions && typeof targetAlbumIdOrOptions === 'object') {
+        options = targetAlbumIdOrOptions
+      } else if (selectedAlbum?.id && selectedAlbum.id !== '__all_tracks__') {
+        options = { albumId: selectedAlbum.id }
+      }
+
+      const result = await window.electronAPI.importMediaFiles(options)
+      if (result && result.success) {
+        if (Array.isArray(result.library)) {
+          setRawLibrary(result.library)
+        } else {
+          await loadLibrary(musicDirectory || DEFAULT_VAULT_DIRECTORY)
+        }
+      }
+      return result || { success: false, importedCount: 0 }
+    } catch (err) {
+      console.error('Error importando archivos a la bóveda:', err)
+      return { success: false, importedCount: 0, error: err.message }
+    }
+  }, [selectedAlbum?.id, loadLibrary, musicDirectory])
 
   const historyRef = useRef([])
   const futureRef = useRef([])
@@ -555,6 +623,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
   eqStateRef.current = eqState
 
   const updateFilterGains = useCallback((gains, enabled) => {
+    void nativeAudioSync.setEqualizerBands(gains, enabled)
     if (!eqFiltersRef.current || eqFiltersRef.current.length === 0) return
     const ctxTime = audioContextRef.current?.currentTime || 0
     eqFiltersRef.current.forEach((filter, i) => {
@@ -566,6 +635,12 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
     })
   }, [])
+
+  // Sincronizar bandas iniciales del ecualizador con el motor nativo Android Media3 al montar
+  useEffect(() => {
+    if (isMiniPanel) return
+    void nativeAudioSync.setEqualizerBands(eqStateRef.current.gains, eqStateRef.current.enabled)
+  }, [isMiniPanel])
 
   const initAudioAnalyser = useCallback(() => {
     if (isMiniPanel || !audioRef.current) return null
@@ -998,7 +1073,35 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     loadLyricsForTrack(currentTrack, { forceOnline: true, bypassCache: true })
   }, [currentTrack, loadLyricsForTrack])
 
-  // Carga un archivo de audio en el elemento Audio y actualiza estados de reproducción
+  // Detectar si la pista activa es un archivo de video (mp4, mkv, webm, mov)
+  const isVideoTrack = useMemo(() => {
+    if (!currentTrack) return false
+    if (currentTrack.mediaType === 'video') return true
+    const candidateName = currentTrack.fileName || currentTrack.path || ''
+    return /\.(mp4|mkv|webm|mov|m4v|avi)$/i.test(candidateName)
+  }, [currentTrack])
+
+  // Vincular un elemento <video> de la interfaz para reproducir su imagen sincronizada con el motor de audio
+  const bindVideoElement = useCallback((videoEl) => {
+    videoRef.current = videoEl || null
+    if (!videoEl || !currentTrack) return
+    try {
+      videoEl.muted = true
+      videoEl.playsInline = true
+      const resolvedUrl = resolveAudioSrc(currentTrack)
+      if (videoEl.src !== resolvedUrl) {
+        videoEl.src = resolvedUrl
+      }
+      if (audioRef.current) {
+        videoEl.currentTime = audioRef.current.currentTime || 0
+        if (!audioRef.current.paused) {
+          videoEl.play().catch(() => {})
+        }
+      }
+    } catch (_) {}
+  }, [currentTrack])
+
+  // Carga un archivo de audio/video en el motor híbrido (HTMLAudioElement + NativeAudioBridge) y actualiza estados
   const loadAndPlayTrack = useCallback((track, album = null, index = -1) => {
     if (isMiniPanel || !track) return
     const audio = audioRef.current
@@ -1045,9 +1148,44 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
     setCurrentTime(0)
     lastTimeSyncRef.current = performance.now()
-    window.electronAPI.sendPlayerTime?.(0)
 
-    audio.src = resolveAudioSrc(trackWithCover)
+    const resolvedUrl = resolveAudioSrc(trackWithCover)
+    audio.src = resolvedUrl
+
+    if (videoRef.current) {
+      try {
+        const trackIsVideo =
+          trackWithCover.mediaType === 'video' ||
+          /\.(mp4|mkv|webm|mov|m4v|avi)$/i.test(trackWithCover.fileName || trackWithCover.path || '')
+        if (trackIsVideo) {
+          videoRef.current.muted = true
+          videoRef.current.src = resolvedUrl
+          videoRef.current.currentTime = 0
+          videoRef.current.play().catch(() => {})
+        } else {
+          videoRef.current.pause()
+          videoRef.current.removeAttribute('src')
+        }
+      } catch (_) {}
+    }
+
+    // Sincronizar con el servicio nativo Android Media3 / ExoPlayer
+    void nativeAudioSync.loadTrack({
+      id: trackWithCover.id,
+      url: resolvedUrl,
+      filePath: trackWithCover.filePath || trackWithCover.path || '',
+      title: trackWithCover.title || 'Canción',
+      artist: trackWithCover.artist || 'Artista Desconocido',
+      album: (album || currentAlbum)?.name || trackWithCover.albumName || trackWithCover.album || '',
+      coverUrl: trackWithCover.cover || undefined,
+      duration: trackWithCover.duration || 0,
+      autoPlay: true
+    })
+
+    if (nativeAudioSync.isNativePlatform()) {
+      setIsPlaying(true)
+      return
+    }
 
     const playPromise = audio.play()
     if (playPromise !== undefined) {
@@ -1069,7 +1207,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
           }
         })
     }
-  }, [isMiniPanel, initAudioAnalyser])
+  }, [isMiniPanel, initAudioAnalyser, currentAlbum])
 
   // Reproducir pista específica (selección manual)
   const playTrack = useCallback((track, album = null, newPlaylist = null, index = 0) => {
@@ -1117,10 +1255,32 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
       return
     }
+    if (nativeAudioSync.isNativePlatform()) {
+      if (!isPlaying) {
+        void nativeAudioSync.play()
+        if (videoRef.current && isVideoTrack) {
+          videoRef.current.play().catch(() => {})
+        }
+        setIsPlaying(true)
+      } else {
+        if (videoRef.current) {
+          try {
+            videoRef.current.pause()
+          } catch (_) {}
+        }
+        void nativeAudioSync.pause()
+        setIsPlaying(false)
+      }
+      return
+    }
     initAudioAnalyser()
     if (audio.paused) {
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
         audioContextRef.current.resume().catch(() => {})
+      }
+      void nativeAudioSync.play()
+      if (videoRef.current && isVideoTrack) {
+        videoRef.current.play().catch(() => {})
       }
       const p = audio.play()
       if (p !== undefined) {
@@ -1130,9 +1290,15 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
     } else {
       audio.pause()
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause()
+        } catch (_) {}
+      }
+      void nativeAudioSync.pause()
       setIsPlaying(false)
     }
-  }, [isMiniPanel, currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser])
+  }, [isMiniPanel, currentTrack, playlist, selectedAlbum, currentAlbum, shuffle, playTrack, initAudioAnalyser, isVideoTrack, isPlaying])
 
   const persistSession = useCallback((overrideTime) => {
     if (isMiniPanel || !sessionRestoredRef.current) return
@@ -1167,12 +1333,17 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (audioRef.current && !isNaN(time)) {
       pendingRestoreSeekRef.current = null
       audioRef.current.currentTime = time
+      if (videoRef.current && isVideoTrack) {
+        try {
+          videoRef.current.currentTime = time
+        } catch (_) {}
+      }
       setCurrentTime(time)
       lastTimeSyncRef.current = performance.now()
-      window.electronAPI.sendPlayerTime?.(time)
+      void nativeAudioSync.seekTo(time)
       persistSession(time)
     }
-  }, [isMiniPanel, persistSession])
+  }, [isMiniPanel, persistSession, isVideoTrack])
 
   // Control de volumen
   const setVolumeLevel = useCallback((v) => {
@@ -1185,6 +1356,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (audioRef.current) {
       audioRef.current.volume = clamped
     }
+    void nativeAudioSync.setVolume(clamped)
   }, [isMiniPanel])
 
   // Ajuste relativo de volumen
@@ -1196,6 +1368,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       } else if (audioRef.current) {
         audioRef.current.volume = next
       }
+      void nativeAudioSync.setVolume(next)
       return next
     })
   }, [isMiniPanel])
@@ -1408,16 +1581,19 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     if (isMiniPanel) return
     const audio = audioRef.current
     audio.volume = volume
+    void nativeAudioSync.setVolume(volume)
 
     const onTimeUpdate = () => {
       const t = audio.currentTime
       setCurrentTime(t)
-      // Throttling equilibrado (~250ms) para fluidez visual en MiniPanel sin saturar IPC
+      if (videoRef.current && !videoRef.current.paused && Math.abs((videoRef.current.currentTime || 0) - t) > 0.35) {
+        try {
+          videoRef.current.currentTime = t
+        } catch (_) {}
+      }
       const now = performance.now()
-      if (now - lastTimeSyncRef.current >= 250) {
+      if (now - lastTimeSyncRef.current >= 500) {
         lastTimeSyncRef.current = now
-        window.electronAPI.sendPlayerTime?.(t)
-        // Sincronizar posición con Windows SMTC / auriculares
         if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession && audio.duration) {
           try {
             navigator.mediaSession.setPositionState({
@@ -1457,8 +1633,6 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         return
       }
 
-      // Para errores de decodificación, red o recurso no admitido (ej. archivo bloqueado o corrupto):
-      // Avanzar automáticamente a la siguiente pista tras un breve intervalo para no congelar la reproducción
       console.warn('[Audio Engine] Fallo crítico en pista actual. Avanzando automáticamente a la siguiente pista...')
       setTimeout(() => {
         if (audioRef.current && (audioRef.current.error || audioRef.current.paused)) {
@@ -1469,6 +1643,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     const onEnded = () => handleTrackEndRef.current?.()
     const onPlay = () => {
       setIsPlaying(true)
+      void nativeAudioSync.play()
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
         audioContextRef.current.resume().catch(() => {})
       }
@@ -1480,8 +1655,10 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
     }
     const onPause = () => {
+      if (nativeAudioSync.isNativePlatform()) return
       if (audio.paused) {
         setIsPlaying(false)
+        void nativeAudioSync.pause()
         persistSession(audio.currentTime)
       }
     }
@@ -1505,7 +1682,72 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('pause', onPause)
     }
-  }, [handleTrackEnd, volume, persistSession])
+  }, [isMiniPanel, handleTrackEnd, volume, persistSession])
+
+  // Conectar con el puente nativo Android Media3 / ExoPlayer y ciclo de vida de Capacitor App
+  useEffect(() => {
+    if (isMiniPanel) return
+    const unbind = nativeAudioSync.bindListeners({
+      onTogglePlay: () => togglePlay(),
+      onPlay: () => {
+        if (audioRef.current && audioRef.current.paused) {
+          togglePlay()
+        }
+      },
+      onPause: () => {
+        if (audioRef.current && !audioRef.current.paused) {
+          togglePlay()
+        }
+      },
+      onNext: () => nextTrack(),
+      onPrevious: () => previousTrack(),
+      onSeekTo: (pos) => seekTo(pos),
+      onTrackEnded: () => handleTrackEndRef.current?.(),
+      onPlaybackProgress: (t, dur) => {
+        setCurrentTime(t)
+        if (typeof dur === 'number' && dur > 0) {
+          setDuration(dur)
+        }
+      },
+      onStateReconcile: (nativeState) => {
+        if (!nativeState) return
+        if (
+          typeof nativeState.currentTime === 'number' &&
+          !isNaN(nativeState.currentTime) &&
+          nativeState.currentTime >= 0
+        ) {
+          if (
+            audioRef.current &&
+            Math.abs((audioRef.current.currentTime || 0) - nativeState.currentTime) > 1.2
+          ) {
+            try {
+              audioRef.current.currentTime = nativeState.currentTime
+            } catch (_) {}
+          }
+          setCurrentTime(nativeState.currentTime)
+        }
+        if (typeof nativeState.duration === 'number' && nativeState.duration > 0) {
+          setDuration(nativeState.duration)
+        }
+        if (typeof nativeState.isPlaying === 'boolean') {
+          setIsPlaying(nativeState.isPlaying)
+          if (!nativeAudioSync.isNativePlatform() && audioRef.current) {
+            if (nativeState.isPlaying && audioRef.current.paused) {
+              audioRef.current.play().catch(() => {})
+            } else if (!nativeState.isPlaying && !audioRef.current.paused) {
+              audioRef.current.pause()
+            }
+          }
+        }
+      },
+      getCurrentAudioState: () => ({
+        isPlaying: Boolean(audioRef.current && !audioRef.current.paused),
+        currentTime: audioRef.current?.currentTime || 0,
+        duration: audioRef.current?.duration || duration || 0
+      })
+    })
+    return unbind
+  }, [isMiniPanel, togglePlay, nextTrack, previousTrack, seekTo, duration])
 
   // Persistir sesión ante cambios de pista, álbum, volumen, bucle o aleatorio y al cerrar ventana
   useEffect(() => {
@@ -1801,17 +2043,19 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
 
   // Copiar/agregar una canción a uno o varios álbumes y actualizar biblioteca en vivo
   const addTrackToAlbums = useCallback(async (track, targetAlbums) => {
-    if (!track?.path || !Array.isArray(targetAlbums) || targetAlbums.length === 0) {
+    if ((!track?.path && !track?.id) || !Array.isArray(targetAlbums) || targetAlbums.length === 0) {
       return { success: false }
     }
     try {
       const result = await window.electronAPI.addTrackToAlbums({
+        track: { id: track.id, path: track.path },
+        albumIds: targetAlbums.map((a) => (typeof a === 'string' ? a : a.id || a.path || a.name)),
         sourceTrackPath: track.path,
-        targetAlbums: targetAlbums.map((a) => ({
-          id: a.id,
-          name: a.name,
-          path: a.path
-        })),
+        targetAlbums: targetAlbums.map((a) =>
+          typeof a === 'string'
+            ? { id: a, name: a, path: a }
+            : { id: a.id, name: a.name, path: a.path }
+        ),
         selectedDirectory: musicDirectory || undefined
       })
       if (result && result.success && Array.isArray(result.library)) {
@@ -1824,9 +2068,9 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [musicDirectory])
 
-  // Eliminar enlace duro de canción del disco (y el original en Canciones_reales si era su último enlace)
+  // Eliminar vínculo de canción en un álbum (y el archivo maestro en la bóveda si era su última referencia)
   const deleteTrackFromDisk = useCallback(async (track, options = {}) => {
-    if (!track?.path) return { success: false }
+    if (!track?.path && !track?.id) return { success: false }
     try {
       const info = getTrackAlbumInfo(track)
       const isLastAlbumLink = (info?.albumCount || 1) <= 1
@@ -1840,7 +2084,6 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         setIsPlaying(false)
         audio.removeAttribute('src')
         audio.load()
-        // Breve espera para que Chromium y Windows liberen el handle de audio en disco
         await new Promise((r) => setTimeout(r, 40))
         if (remaining.length > 0) {
           const nextIdx = Math.min(Math.max(0, playlistIndex), remaining.length - 1)
@@ -1859,7 +2102,10 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       }
 
       const result = await window.electronAPI.deleteTrackFile({
+        trackId: track.id,
+        albumId: options.albumId || track.albumId,
         filePath: track.path,
+        deleteAllCopies: options.deleteAllCopies,
         forceDeleteMaster,
         skipScan,
         selectedDirectory: musicDirectory || undefined
@@ -1875,7 +2121,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     }
   }, [currentTrack, playlist, playlistIndex, musicDirectory, getTrackAlbumInfo])
 
-  // Quitar una canción de un álbum específico (eliminando el Hard Link de la carpeta de ese álbum)
+  // Quitar una canción de un álbum específico (eliminando la relación en album_tracks o Hard Link)
   const removeTrackFromAlbum = useCallback(async (track, targetAlbum) => {
     if (!track || !targetAlbum) return { success: false, error: 'Parámetros inválidos' }
     try {
@@ -1898,7 +2144,7 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
       const copyPath = copy?.filePath || copy?.track?.path
 
       if (!trackToDelete && copyPath) {
-        trackToDelete = { ...track, path: copyPath, id: copyPath }
+        trackToDelete = { ...track, path: copyPath, id: track.id || copyPath }
       }
 
       // 2. Si no se encontró en info.copies, buscar en los tracks cargados del álbum destino
@@ -1921,30 +2167,33 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
       }
 
-      // 4. Fallback seguro: solo si es el único álbum restante y tenemos la ruta exacta de la pista
-      if (!trackToDelete && isLastAlbumLink && track.path) {
+      // 4. Fallback seguro con el propio objeto track y targetAlbumId
+      if (!trackToDelete && (track.id || track.path)) {
         trackToDelete = track
       }
 
-      if (!trackToDelete || !trackToDelete.path) {
+      if (!trackToDelete || (!trackToDelete.path && !trackToDelete.id)) {
         return { success: false, error: 'No se encontró el enlace de la pista en el álbum indicado' }
       }
 
-      return await deleteTrackFromDisk(trackToDelete, { forceDeleteMaster: isLastAlbumLink })
+      return await deleteTrackFromDisk(trackToDelete, {
+        albumId: targetAlbumId,
+        deleteAllCopies: false,
+        forceDeleteMaster: isLastAlbumLink
+      })
     } catch (err) {
       console.error('Error al quitar canción del álbum:', err)
       return { success: false, error: err.message }
     }
   }, [getTrackAlbumInfo, deleteTrackFromDisk])
 
-  // Eliminar una canción de TODOS los álbumes donde exista (todos sus Hard Links + el archivo original en Canciones_reales)
+  // Eliminar una canción de TODOS los álbumes donde exista y limpiar el archivo maestro en la bóveda
   const deleteTrackFromAllAlbums = useCallback(async (track) => {
     if (!track) return { success: false }
     try {
       const info = getTrackAlbumInfo(track)
       const copies = info?.copies || []
 
-      // Recopilar todas las rutas únicas a eliminar
       const pathsToDelete = new Set()
       if (track.path) pathsToDelete.add(track.path)
       for (const copy of copies) {
@@ -1952,7 +2201,6 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         if (copyPath) pathsToDelete.add(copyPath)
       }
 
-      // Si la pista que se está reproduciendo coincide con alguna de las copias
       const audio = audioRef.current
       const isCurrentlyPlaying = currentTrack && (
         currentTrack.id === track.id ||
@@ -1983,18 +2231,13 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
         }
       }
 
-      const pathsArray = Array.from(pathsToDelete)
-      let lastResult = { success: true }
-      for (let i = 0; i < pathsArray.length; i++) {
-        const filePath = pathsArray[i]
-        const isFinalLink = i === pathsArray.length - 1
-        lastResult = await window.electronAPI.deleteTrackFile({
-          filePath,
-          forceDeleteMaster: isFinalLink,
-          skipScan: !isFinalLink,
-          selectedDirectory: musicDirectory || undefined
-        })
-      }
+      const lastResult = await window.electronAPI.deleteTrackFile({
+        trackId: track.id,
+        filePath: track.path || Array.from(pathsToDelete)[0],
+        deleteAllCopies: true,
+        forceDeleteMaster: true,
+        selectedDirectory: musicDirectory || undefined
+      })
 
       if (lastResult && lastResult.success && Array.isArray(lastResult.library)) {
         setRawLibrary(lastResult.library)
@@ -2359,7 +2602,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     isLoading,
     musicDirectory,
     updateMusicDirectory,
-    loadLibrary
+    loadLibrary,
+    importFilesToVault
   }), [
     library,
     allAlbums,
@@ -2381,16 +2625,20 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     isLoading,
     musicDirectory,
     updateMusicDirectory,
-    loadLibrary
+    loadLibrary,
+    importFilesToVault
   ])
 
-  // Contexto de Reproducción (controles de audio, pista actual, cola, volumen y ecualizador)
+  // Contexto de Reproducción (controles de audio/video, pista actual, cola, volumen y ecualizador)
   const playbackValue = useMemo(() => ({
     currentTrack,
     currentAlbum,
     playlist,
     playlistIndex,
     isPlaying,
+    isVideoTrack,
+    videoRef,
+    bindVideoElement,
     duration,
     volume,
     shuffle,
@@ -2399,6 +2647,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     togglePlay,
     nextTrack,
     previousTrack,
+    playNext: nextTrack,
+    playPrevious: previousTrack,
     seekTo,
     setVolumeLevel,
     adjustVolume,
@@ -2427,6 +2677,8 @@ export function PlayerProvider({ children, isMiniPanel = false }) {
     playlist,
     playlistIndex,
     isPlaying,
+    isVideoTrack,
+    bindVideoElement,
     duration,
     volume,
     shuffle,

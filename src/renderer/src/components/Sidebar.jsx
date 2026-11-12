@@ -1,6 +1,7 @@
 import { useLibrary } from '../context/PlayerContext'
 import React, { useState, useMemo, useCallback, useRef, useEffect, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
+import { triggerHaptic } from './BottomNavBar'
 
 /**
  * Determina si un nodo puede arrastrarse (carpetas y álbumes reales en disco,
@@ -57,12 +58,42 @@ const TreeNode = React.memo(function TreeNode({
   const isBeingDragged = dragState?.node?.id === node.id
   const isDropTarget = dragState?.targetId === node.id
   const isAllTracks = Boolean(node.isAllTracks || node.id === '__all_tracks__')
+  const longPressTimerRef = useRef(null)
 
   const handleContextMenu = (e) => {
     if (draggable || isAllTracks) {
       e.preventDefault()
       e.stopPropagation()
       onContextMenuNode(node, { x: e.clientX, y: e.clientY }, depth)
+    }
+  }
+
+  const handleMoreClick = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    void triggerHaptic()
+    const rect = e.currentTarget.getBoundingClientRect()
+    onContextMenuNode(node, { x: rect.left, y: rect.bottom + 6 }, depth)
+  }
+
+  const handleTouchStart = (e) => {
+    if (!draggable && !isAllTracks) return
+    const touch = e.touches?.[0]
+    if (!touch) return
+    const clientX = touch.clientX
+    const clientY = touch.clientY
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current)
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null
+      void triggerHaptic()
+      onContextMenuNode(node, { x: clientX, y: clientY }, depth)
+    }, 450)
+  }
+
+  const clearLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
     }
   }
 
@@ -80,6 +111,10 @@ const TreeNode = React.memo(function TreeNode({
           data-is-all-tracks="false"
           className={`folder-header-bar ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
           onContextMenu={handleContextMenu}
+          onTouchStart={handleTouchStart}
+          onTouchMove={clearLongPress}
+          onTouchEnd={clearLongPress}
+          onTouchCancel={clearLongPress}
           onPointerDown={(e) => draggable && onStartDrag(e, node, depth, false)}
           onClick={() => {
             if (isDraggingOrJustFinished?.()) return
@@ -104,6 +139,20 @@ const TreeNode = React.memo(function TreeNode({
           <span className="folder-badge" title={`${node.itemCount} álbumes / subcarpetas`}>
             {node.itemCount}
           </span>
+
+          {/* Botón táctil de opciones (⋮) para crear álbum/carpeta dentro, renombrar o eliminar */}
+          {draggable && (
+            <button
+              type="button"
+              className="node-more-btn"
+              onClick={handleMoreClick}
+              onPointerDown={(e) => e.stopPropagation()}
+              title="Opciones de carpeta"
+              aria-label={`Opciones de carpeta ${node.name}`}
+            >
+              ⋮
+            </button>
+          )}
 
           {/* Borde derecho exclusivo para agarrar y arrastrar */}
           {draggable && (
@@ -155,6 +204,10 @@ const TreeNode = React.memo(function TreeNode({
       data-is-all-tracks={isAllTracks ? 'true' : 'false'}
       className={`album-item ${isSelected ? 'active' : ''} ${isAllTracks ? 'album-item-all-tracks' : ''} depth-${depth} ${isBeingDragged ? 'dragging-node' : ''} ${isDropTarget ? 'drag-over-target' : ''}`}
       onContextMenu={handleContextMenu}
+      onTouchStart={handleTouchStart}
+      onTouchMove={clearLongPress}
+      onTouchEnd={clearLongPress}
+      onTouchCancel={clearLongPress}
       onPointerDown={(e) => draggable && onStartDrag(e, node, depth, false)}
       onClick={() => {
         if (isDraggingOrJustFinished?.()) return
@@ -202,6 +255,20 @@ const TreeNode = React.memo(function TreeNode({
           )}
         </div>
       </div>
+
+      {/* Botón táctil de opciones (⋮) para renombrar, mover o eliminar álbum */}
+      {draggable && (
+        <button
+          type="button"
+          className="node-more-btn"
+          onClick={handleMoreClick}
+          onPointerDown={(e) => e.stopPropagation()}
+          title="Opciones de álbum"
+          aria-label={`Opciones de álbum ${node.name}`}
+        >
+          ⋮
+        </button>
+      )}
 
       {/* Borde derecho exclusivo para agarrar y arrastrar (solo en álbumes reales de disco) */}
       {draggable && (
@@ -702,12 +769,9 @@ function DeleteAlbumModal({ node, onClose, onConfirm, isDeleting }) {
 
         <div className="track-modal-body">
           <p className="track-delete-warning">
-            Se eliminará la carpeta y sus <strong>enlaces duros (Hard Links)</strong> en{' '}
-            <code>canciones_organizadas</code>. Las canciones que aún tengan enlaces en otros álbumes conservarán su archivo original en{' '}
-            <code>Canciones_reales</code>; aquellas cuyo <strong>último enlace</strong> esté en este álbum también se eliminarán de{' '}
-            <code>Canciones_reales</code>:
+            Se eliminará {isFolder ? 'la carpeta' : 'el álbum'} y sus vínculos virtuales en la bóveda SQLite. Las canciones que sigan asignadas a otros álbumes se conservarán intactas; aquellas cuyo <strong>último vínculo</strong> esté aquí se eliminarán de <code>app_vault/tracks/</code>:
           </p>
-          <div className="track-delete-path-box">{node?.path}</div>
+          <div className="track-delete-path-box">{node?.path || node?.name}</div>
         </div>
 
         <div className="track-modal-footer">
@@ -978,7 +1042,7 @@ function MoveAlbumModal({ node, library, depth = 0, onClose, onConfirm, isMoving
   return typeof document !== 'undefined' ? createPortal(content, document.body) : null
 }
 
-function Sidebar({ isOpen = true, onToggle }) {
+function Sidebar({ isOpen = true, onToggle, isMobileFullView = false, onAlbumSelected }) {
   const {
     library,
     selectedAlbum,
@@ -988,8 +1052,18 @@ function Sidebar({ isOpen = true, onToggle }) {
     createFolder,
     moveAlbumFolder,
     renameAlbumFolder,
-    deleteAlbumFolder
+    deleteAlbumFolder,
+    importFilesToVault
   } = useLibrary()
+
+  const handleSelectAlbumNode = useCallback(
+    (node) => {
+      void triggerHaptic()
+      setSelectedAlbum(node)
+      onAlbumSelected?.(node)
+    },
+    [setSelectedAlbum, onAlbumSelected]
+  )
   const [searchQuery, setSearchQuery] = useState('')
   const deferredSearchQuery = useDeferredValue(searchQuery)
   const [expandedFolders, setExpandedFolders] = useState({})
@@ -1504,11 +1578,11 @@ function Sidebar({ isOpen = true, onToggle }) {
   // MODO EXPANDIDO COMPLETO
   // ============================================
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${isMobileFullView ? 'sidebar-mobile-full' : ''}`}>
       <div className="sidebar-header">
         <div className="sidebar-header-top">
-          <h2>Biblioteca</h2>
-          {onToggle && (
+          <h2>Álbumes y Carpetas</h2>
+          {onToggle && !isMobileFullView && (
             <button className="sidebar-collapse-btn" onClick={onToggle} title="Ocultar barra lateral a un marcador">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
@@ -1519,17 +1593,46 @@ function Sidebar({ isOpen = true, onToggle }) {
         <input
           type="text"
           className="sidebar-search"
-          placeholder="Buscar álbum, artista o canción..."
+          placeholder="Buscar álbum, carpeta o canción..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
         />
+
+        {/* Botones táctiles grandes de acción rápida (Crear Álbum / Crear Carpeta / Importar) */}
+        <div className="sidebar-mobile-actions-row">
+          <button
+            type="button"
+            className="sidebar-quick-action-btn primary"
+            onClick={() => handleOpenCreateModal('album', '__ROOT__', 'Nivel principal')}
+          >
+            <span>➕</span>
+            <span>Nuevo Álbum</span>
+          </button>
+          <button
+            type="button"
+            className="sidebar-quick-action-btn"
+            onClick={() => handleOpenCreateModal('folder', '__ROOT__', 'Nivel principal')}
+          >
+            <span>📁</span>
+            <span>Nueva Carpeta</span>
+          </button>
+          <button
+            type="button"
+            className="sidebar-quick-action-btn accent"
+            onClick={() => importFilesToVault?.()}
+            title="Importar archivos de audio o video a la bóveda"
+          >
+            <span>📥</span>
+            <span>Importar</span>
+          </button>
+        </div>
       </div>
 
       <div
         className={`album-list ${dragState ? 'is-dragging-active' : ''} ${dragState?.targetId === '__ROOT__' ? 'root-drag-active' : ''}`}
         onContextMenu={handleBackgroundContextMenu}
       >
-        {/* Elemento especial arriba del todo: Crear álbum */}
+        {/* Elemento especial arriba del todo: Crear álbum rápido */}
         <div className={`create-album-card ${isCreatingAlbum ? 'editing' : ''}`}>
           {!isCreatingAlbum ? (
             <button
@@ -1545,8 +1648,8 @@ function Sidebar({ isOpen = true, onToggle }) {
                 </svg>
               </div>
               <div className="create-album-info">
-                <div className="create-album-title">Crear álbum</div>
-                <div className="create-album-subtitle">Nueva carpeta de canciones</div>
+                <div className="create-album-title">Crear álbum rápido</div>
+                <div className="create-album-subtitle">Nueva colección en la bóveda SQLite</div>
               </div>
               <span className="create-album-pill">+ Nuevo</span>
             </button>
@@ -1623,7 +1726,7 @@ function Sidebar({ isOpen = true, onToggle }) {
         {filteredTree.length === 0 && (
           <p style={{ padding: '20px', textAlign: 'center', color: 'var(--text-dim)', fontSize: '13px' }}>
             {library.length === 0
-              ? 'No se encontraron carpetas. Agrega música a "canciones_organizadas".'
+              ? 'Tu bóveda está vacía. Toca "Importar" para añadir música o videos desde tu teléfono.'
               : 'Sin resultados para tu búsqueda.'}
           </p>
         )}
@@ -1634,7 +1737,7 @@ function Sidebar({ isOpen = true, onToggle }) {
             node={node}
             depth={0}
             selectedAlbumId={selectedAlbum?.id}
-            onSelectAlbum={setSelectedAlbum}
+            onSelectAlbum={handleSelectAlbumNode}
             expandedFolders={expandedFolders}
             onToggleFolder={handleToggleFolder}
             isSearching={!!searchQuery.trim()}

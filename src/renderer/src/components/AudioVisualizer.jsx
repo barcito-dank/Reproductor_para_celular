@@ -157,6 +157,13 @@ function AudioVisualizer({ height = 54, barCount = 36, isCompact = false }) {
           }
           rawVal = cnt > 0 ? sum / cnt : (dataArray[freqIndex] || 0)
         }
+        if (playingNow && advancePhysics && rawVal === 0) {
+          const tNow = performance.now() * 0.0065
+          const waveA = Math.sin(tNow * 1.9 + i * 0.42) * 0.5 + 0.5
+          const waveB = Math.cos(tNow * 3.1 - i * 0.27) * 0.5 + 0.5
+          const envelope = 1 - Math.abs(ratio - 0.32) * 0.65
+          rawVal = Math.max(18, Math.min(240, (waveA * 0.6 + waveB * 0.4) * 195 * envelope))
+        }
 
         const trebleCompensation = 1 + Math.pow(ratio, 0.75) * 0.75
         const normalized = (rawVal / 255) * trebleCompensation

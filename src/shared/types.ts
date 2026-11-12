@@ -16,6 +16,8 @@ export interface Track {
   ino?: string | number
   mtimeMs?: number
   size?: number
+  sizeBytes?: number
+  mediaType?: 'audio' | 'video'
   format?: {
     bitrate?: number
     sampleRate?: number

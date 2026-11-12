@@ -1,7 +1,13 @@
-import { usePlayback, usePlayerTime, EQ_FREQUENCIES, EQ_PRESETS } from '../context/PlayerContext'
-import React, { useState, useRef, useCallback, useEffect } from 'react'
+import {
+  usePlayback,
+  useLibrary,
+  usePlayerTime,
+  EQ_FREQUENCIES,
+  EQ_PRESETS
+} from '../context/PlayerContext'
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import AudioVisualizer from './AudioVisualizer'
-import LyricsDock from './LyricsDock'
+import { triggerHaptic } from './BottomNavBar'
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00'
@@ -12,158 +18,207 @@ function formatTime(seconds) {
 
 const Icons = {
   Play: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M8 5v14l11-7z" />
+    </svg>
   ),
   Pause: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+    </svg>
   ),
   Next: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+    </svg>
   ),
   Previous: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+    </svg>
   ),
   Shuffle: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z" />
+    </svg>
   ),
   Loop: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
+    </svg>
   ),
   LoopOne: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/><text x="12" y="15" textAnchor="middle" fontSize="7" fill="currentColor" fontWeight="bold">1</text></svg>
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
+      <text x="12" y="15" textAnchor="middle" fontSize="7" fill="currentColor" fontWeight="bold">
+        1
+      </text>
+    </svg>
   ),
-  Volume: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-  ),
-  Mute: () => (
-    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+  Bookmark: ({ filled = false }) => (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    </svg>
   )
 }
 
 /**
- * Sub-componente aislado para la barra de progreso e indicadores de tiempo.
- * Es el único componente del reproductor que se suscribe a los cambios de alta frecuencia de currentTime,
- * evitando que el resto del reproductor (controles, carátula, ecualizador) se renderice innecesariamente.
+ * Barra fina de progreso aislada para el MiniPlayer acoplado.
+ * Solo este subcomponente se re-renderiza con currentTime.
+ */
+function MiniPlayerProgressBar({ duration }) {
+  const { currentTime } = usePlayerTime()
+  const percent = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0
+  return (
+    <div className="mini-player-progress-track">
+      <div className="mini-player-progress-fill" style={{ width: `${percent}%` }} />
+    </div>
+  )
+}
+
+/**
+ * Barra de progreso táctil e interactiva (Scrubber) compatible con Touch Events y Mouse Events.
  */
 function PlayerTimeline({ duration, isPlaying, seekTo }) {
   const { currentTime } = usePlayerTime()
   const progressBarRef = useRef(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [scrubValue, setScrubValue] = useState(0)
-  const [hoverPosition, setHoverPosition] = useState(null)
   const [showRemainingTime, setShowRemainingTime] = useState(false)
+  const scrubValueRef = useRef(0)
 
   const activeTime = isScrubbing ? scrubValue : currentTime
-  const progressPercent = duration > 0 ? Math.min(100, Math.max(0, (activeTime / duration) * 100)) : 0
+  const progressPercent =
+    duration > 0 ? Math.min(100, Math.max(0, (activeTime / duration) * 100)) : 0
 
-  const getPositionFromEvent = useCallback((e) => {
+  const getRatioFromClientX = useCallback((clientX) => {
     if (!progressBarRef.current) return 0
     const rect = progressBarRef.current.getBoundingClientRect()
-    const clientX = e.clientX ?? (e.touches ? e.touches[0].clientX : 0)
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-    return ratio
+    if (rect.width <= 0) return 0
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
   }, [])
 
-  // Inicio de arrastre/clic en barra de progreso
-  const handleMouseDown = useCallback((e) => {
-    if (!duration || duration <= 0) return
-    setIsScrubbing(true)
-    const ratio = getPositionFromEvent(e)
-    const newTime = ratio * duration
-    setScrubValue(newTime)
+  // Soporte de ratón
+  const handleMouseDown = useCallback(
+    (e) => {
+      if (!duration || duration <= 0) return
+      e.stopPropagation()
+      setIsScrubbing(true)
+      const ratio = getRatioFromClientX(e.clientX)
+      const newTime = ratio * duration
+      scrubValueRef.current = newTime
+      setScrubValue(newTime)
 
-    const onMouseMove = (moveEvent) => {
-      const moveRatio = getPositionFromEvent(moveEvent)
-      setScrubValue(moveRatio * duration)
-    }
+      const onMouseMove = (moveEvent) => {
+        const moveRatio = getRatioFromClientX(moveEvent.clientX)
+        const nextTime = moveRatio * duration
+        scrubValueRef.current = nextTime
+        setScrubValue(nextTime)
+      }
 
-    const onMouseUp = (upEvent) => {
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
-      const upRatio = getPositionFromEvent(upEvent)
-      const finalTime = upRatio * duration
+      const onMouseUp = (upEvent) => {
+        window.removeEventListener('mousemove', onMouseMove)
+        window.removeEventListener('mouseup', onMouseUp)
+        const upRatio = getRatioFromClientX(upEvent.clientX)
+        const finalTime = upRatio * duration
+        seekTo(finalTime)
+        setIsScrubbing(false)
+      }
+
+      window.addEventListener('mousemove', onMouseMove)
+      window.addEventListener('mouseup', onMouseUp)
+    },
+    [duration, getRatioFromClientX, seekTo]
+  )
+
+  // Soporte táctil nativo sin saltos (Android / Motorola)
+  const handleTouchStart = useCallback(
+    (e) => {
+      if (!duration || duration <= 0) return
+      e.stopPropagation()
+      const touch = e.touches[0]
+      if (!touch) return
+      setIsScrubbing(true)
+      const ratio = getRatioFromClientX(touch.clientX)
+      const newTime = ratio * duration
+      scrubValueRef.current = newTime
+      setScrubValue(newTime)
+    },
+    [duration, getRatioFromClientX]
+  )
+
+  const handleTouchMove = useCallback(
+    (e) => {
+      if (!isScrubbing || !duration || duration <= 0) return
+      e.stopPropagation()
+      const touch = e.touches[0]
+      if (!touch) return
+      const ratio = getRatioFromClientX(touch.clientX)
+      const nextTime = ratio * duration
+      scrubValueRef.current = nextTime
+      setScrubValue(nextTime)
+    },
+    [isScrubbing, duration, getRatioFromClientX]
+  )
+
+  const handleTouchEnd = useCallback(
+    (e) => {
+      if (!isScrubbing) return
+      e.stopPropagation()
+      const changedTouch = e.changedTouches?.[0]
+      const finalTime = changedTouch
+        ? getRatioFromClientX(changedTouch.clientX) * duration
+        : scrubValueRef.current
       seekTo(finalTime)
       setIsScrubbing(false)
-    }
-
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
-  }, [duration, getPositionFromEvent, seekTo])
-
-  // Hover sobre la barra para previsualizar el tiempo
-  const handleMouseMoveHover = useCallback((e) => {
-    if (!duration || duration <= 0) return
-    const ratio = getPositionFromEvent(e)
-    setHoverPosition({
-      percent: ratio * 100,
-      time: ratio * duration
-    })
-  }, [duration, getPositionFromEvent])
-
-  const handleMouseLeaveHover = useCallback(() => {
-    setHoverPosition(null)
-  }, [])
+    },
+    [isScrubbing, duration, getRatioFromClientX, seekTo]
+  )
 
   return (
     <div className="player-timeline-wrapper">
-      <span className="time-label current-time">
-        {formatTime(activeTime)}
-      </span>
+      <span className="time-label current-time">{formatTime(activeTime)}</span>
 
       <div
         className={`progress-bar-hitbox ${isPlaying ? 'playing' : ''} ${isScrubbing ? 'scrubbing' : ''}`}
         ref={progressBarRef}
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMoveHover}
-        onMouseLeave={handleMouseLeaveHover}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
       >
-        {/* Halo de resplandor ambiental inferior acelerado por GPU (scaleX evita re-calcular blur en cada tick) */}
         <div
           className="progress-ambient-glow"
           style={{ transform: `translateY(-50%) scaleX(${progressPercent / 100})` }}
         />
 
         <div className="progress-bar-track">
-          {/* Marcas sutiles de ondas (Audio Ticks) en el fondo del track */}
           <div className="progress-audio-ticks" />
-
-          {/* Relleno con gradiente neón vibrante y onda de luz compuesta en GPU */}
           <div
             className={`progress-bar-fill ${isPlaying ? 'shimmer-active' : ''}`}
             style={{ width: `${progressPercent}%` }}
           >
             <div className="progress-shimmer-clip" />
-            {/* Cabeza de luz láser brillante en el extremo */}
             <div className="progress-glow-head" />
-            {/* Indicador circular deslizable (Thumb) */}
             <div className={`progress-thumb ${isScrubbing ? 'scrubbing' : ''}`} />
           </div>
-
-          {/* Cursor láser vertical en posición hover */}
-          {hoverPosition && (
-            <div
-              className="progress-hover-line"
-              style={{ left: `${hoverPosition.percent}%` }}
-            />
-          )}
-
-          {/* Tooltip flotante con previsualización de tiempo */}
-          {hoverPosition && (
-            <div
-              className="progress-hover-tooltip"
-              style={{ left: `${hoverPosition.percent}%` }}
-            >
-              <span className="tooltip-time">{formatTime(hoverPosition.time)}</span>
-              <div className="tooltip-arrow" />
-            </div>
-          )}
         </div>
       </div>
 
       <span
         className="time-label total-time clickable"
-        onClick={() => setShowRemainingTime(prev => !prev)}
-        title="Clic para alternar duración total o tiempo restante"
+        onClick={() => setShowRemainingTime((prev) => !prev)}
+        title="Toca para alternar duración total o tiempo restante"
       >
         {showRemainingTime && duration > 0
           ? `-${formatTime(Math.max(0, duration - activeTime))}`
@@ -174,133 +229,372 @@ function PlayerTimeline({ duration, isPlaying, seekTo }) {
 }
 
 /**
- * Modal del Ecualizador Paramétrico de 10 Bandas con Web Audio API en tiempo real
+ * Vista integrada de Letras Karaoke dentro del NowPlayingSheet
  */
-function EqualizerModal({
-  isOpen,
-  onClose,
-  eqState,
-  setEqBandGain,
-  applyEqPreset,
-  toggleEqEnabled,
-  resetEq,
-  EQ_FREQUENCIES = [],
-  EQ_PRESETS = {}
-}) {
-  const modalRef = useRef(null)
+function NowPlayingLyricsView({ currentTrack, seekTo }) {
+  const {
+    currentLyrics,
+    saveCurrentLyricsToDisk,
+    deleteCurrentLyricsFromDisk,
+    retryOnlineLyrics
+  } = usePlayback()
+  const { currentTime } = usePlayerTime()
+  const [feedback, setFeedback] = useState(null)
+  const activeLineRef = useRef(null)
+  const listContainerRef = useRef(null)
 
-  useEffect(() => {
-    if (!isOpen) return
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose()
-    }
-    const handlePointerDown = (e) => {
-      if (modalRef.current && !modalRef.current.contains(e.target)) {
-        onClose()
+  const status = currentLyrics?.status || 'idle'
+  const isLoadingLyrics = status === 'loading' || status === 'searching-online'
+  const lines = currentLyrics?.lines || []
+  const hasLines = lines.length > 0
+  const isSynced = Boolean(currentLyrics?.synced && hasLines)
+  const isSavedOnDisk = hasLines && Boolean(currentLyrics?.savedToDisk)
+
+  let activeIndex = -1
+  if (isSynced) {
+    for (let i = 0; i < lines.length; i++) {
+      if (currentTime >= lines[i].time) {
+        activeIndex = i
+      } else {
+        break
       }
     }
-    window.addEventListener('keydown', handleKeyDown)
-    document.addEventListener('pointerdown', handlePointerDown)
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-      document.removeEventListener('pointerdown', handlePointerDown)
+  }
+
+  useEffect(() => {
+    if (activeLineRef.current && listContainerRef.current) {
+      activeLineRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      })
     }
-  }, [isOpen, onClose])
+  }, [activeIndex])
 
-  if (!isOpen || !eqState) return null
+  const handleSave = async () => {
+    void triggerHaptic()
+    const res = await saveCurrentLyricsToDisk()
+    if (res?.success) {
+      setFeedback('✓ Letra .lrc guardada en la bóveda')
+      setTimeout(() => setFeedback(null), 2500)
+    }
+  }
 
-  const formatHz = (freq) => {
-    return freq >= 1000 ? `${freq / 1000}k` : `${freq}`
+  const handleDelete = async () => {
+    void triggerHaptic()
+    const res = await deleteCurrentLyricsFromDisk()
+    if (res?.success) {
+      setFeedback('🗑️ Archivo .lrc eliminado')
+      setTimeout(() => setFeedback(null), 2500)
+    }
   }
 
   return (
-    <div className="eq-modal-backdrop">
-      <div className="eq-modal-card" ref={modalRef} role="dialog" aria-label="Ecualizador de audio">
-        <div className="eq-modal-header">
-          <div className="eq-modal-title-group">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
-              <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
-              <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
-              <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
-            </svg>
-            <div>
-              <h3>Ecualizador de 10 bandas</h3>
-              <p className="eq-modal-subtitle">Procesamiento Web Audio API en tiempo real</p>
-            </div>
-          </div>
-
-          <div className="eq-header-actions">
+    <div className="np-stage-card np-lyrics-card">
+      <div className="np-stage-card-header">
+        <div className="np-stage-card-title">
+          <span>🎤 Letras Sincronizadas</span>
+          {isSavedOnDisk && <span className="np-badge synced">.LRC Local</span>}
+          {!isSavedOnDisk && hasLines && <span className="np-badge temp">Online</span>}
+        </div>
+        <div className="np-stage-card-actions">
+          {!isLoadingLyrics && (hasLines || Boolean(currentLyrics?.rawLyrics)) && (
+            <button type="button" className="np-mini-pill-btn" onClick={handleSave}>
+              💾 Guardar .lrc
+            </button>
+          )}
+          {!isLoadingLyrics && (hasLines || isSavedOnDisk) && (
+            <button type="button" className="np-mini-pill-btn danger" onClick={handleDelete}>
+              🗑️ Borrar
+            </button>
+          )}
+          {!isLoadingLyrics && currentTrack?.path && (
             <button
               type="button"
-              className={`eq-power-btn ${eqState.enabled ? 'active' : ''}`}
-              onClick={toggleEqEnabled}
-              title={eqState.enabled ? 'Desactivar ecualizador' : 'Activar ecualizador'}
+              className="np-mini-pill-btn"
+              onClick={() => {
+                void triggerHaptic()
+                retryOnlineLyrics()
+              }}
             >
-              <span className="eq-power-indicator" />
-              <span>{eqState.enabled ? 'Activado' : 'Desactivado'}</span>
+              🔄 Buscar
             </button>
-            <button type="button" className="eq-modal-close" onClick={onClose} title="Cerrar">
-              ✕
-            </button>
-          </div>
+          )}
         </div>
+      </div>
 
-        {/* Barra de Perfiles / Presets */}
-        <div className="eq-presets-bar">
-          <span className="eq-presets-label">Perfiles:</span>
-          <div className="eq-presets-scroll">
-            {Object.keys(EQ_PRESETS).map((pName) => (
-              <button
-                key={pName}
-                type="button"
-                className={`eq-preset-pill ${eqState.preset === pName ? 'active' : ''}`}
-                onClick={() => applyEqPreset(pName)}
-              >
-                {pName}
-              </button>
-            ))}
+      {feedback && <div className="np-inline-feedback">{feedback}</div>}
+
+      <div className="np-lyrics-scroll-area" ref={listContainerRef}>
+        {isLoadingLyrics ? (
+          <div className="np-empty-center">
+            <div className="lyrics-spinner" />
+            <p>Buscando letra sincronizada en LRCLIB...</p>
           </div>
-          <button type="button" className="eq-reset-btn" onClick={resetEq} title="Restablecer a plano (0 dB)">
-            Restablecer
+        ) : !hasLines ? (
+          <div className="np-empty-center">
+            <span style={{ fontSize: '32px' }}>🎤</span>
+            <p>No se encontró letra sincronizada para esta pista.</p>
+            {currentTrack?.path && (
+              <button
+                type="button"
+                className="play-album-btn"
+                onClick={() => {
+                  void triggerHaptic()
+                  retryOnlineLyrics()
+                }}
+              >
+                🔍 Buscar en LRCLIB ahora
+              </button>
+            )}
+          </div>
+        ) : (
+          lines.map((line, idx) => {
+            const isCurrent = isSynced && idx === activeIndex
+            const isPast = isSynced && idx < activeIndex
+            return (
+              <div
+                key={`${line.time}-${idx}`}
+                ref={isCurrent ? activeLineRef : null}
+                className={`np-lyric-line ${isCurrent ? 'active' : ''} ${isPast ? 'past' : ''}`}
+                onClick={() => {
+                  if (line.time !== undefined) {
+                    void triggerHaptic()
+                    seekTo(line.time)
+                  }
+                }}
+              >
+                {isSynced && <span className="np-lyric-time">{formatTime(line.time)}</span>}
+                <span className="np-lyric-text">{line.text || '♪'}</span>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Vista integrada de Ecualizador de 10 Bandas dentro del NowPlayingSheet
+ */
+function NowPlayingEqualizerView() {
+  const {
+    eqState,
+    setEqBandGain,
+    applyEqPreset,
+    toggleEqEnabled,
+    resetEq
+  } = usePlayback()
+
+  if (!eqState) return null
+
+  const formatHz = (freq) => (freq >= 1000 ? `${freq / 1000}k` : `${freq}`)
+
+  return (
+    <div className="np-stage-card np-eq-card">
+      <div className="np-stage-card-header">
+        <div className="np-stage-card-title">
+          <span>🎚️ Ecualizador de 10 Bandas</span>
+        </div>
+        <div className="np-stage-card-actions">
+          <button
+            type="button"
+            className={`eq-power-btn ${eqState.enabled ? 'active' : ''}`}
+            onClick={() => {
+              void triggerHaptic()
+              toggleEqEnabled()
+            }}
+          >
+            <span className="eq-power-indicator" />
+            <span>{eqState.enabled ? 'Activo' : 'Inactivo'}</span>
+          </button>
+          <button
+            type="button"
+            className="np-mini-pill-btn"
+            onClick={() => {
+              void triggerHaptic()
+              resetEq()
+            }}
+          >
+            Plano (0 dB)
           </button>
         </div>
+      </div>
 
-        {/* Sliders Verticales */}
-        <div className={`eq-sliders-container ${!eqState.enabled ? 'eq-disabled' : ''}`}>
-          <div className="eq-scale-labels">
-            <span>+12 dB</span>
-            <span>0 dB</span>
-            <span>-12 dB</span>
-          </div>
+      <div className="eq-presets-scroll np-eq-presets">
+        {Object.keys(EQ_PRESETS).map((pName) => (
+          <button
+            key={pName}
+            type="button"
+            className={`eq-preset-pill ${eqState.preset === pName ? 'active' : ''}`}
+            onClick={() => {
+              void triggerHaptic()
+              applyEqPreset(pName)
+            }}
+          >
+            {pName}
+          </button>
+        ))}
+      </div>
 
-          <div className="eq-sliders-track-area">
-            <div className="eq-center-zero-line" />
-            {EQ_FREQUENCIES.map((freq, i) => {
-              const gain = eqState.gains[i] ?? 0
-              return (
-                <div key={freq} className="eq-band-col">
-                  <span className="eq-band-db">
-                    {gain > 0 ? `+${gain.toFixed(0)}` : gain.toFixed(0)}
-                  </span>
-                  <div className="eq-slider-wrapper">
-                    <input
-                      type="range"
-                      min="-12"
-                      max="12"
-                      step="0.5"
-                      value={gain}
-                      disabled={!eqState.enabled}
-                      onChange={(e) => setEqBandGain(i, parseFloat(e.target.value))}
-                      className="eq-vertical-slider"
-                    />
-                  </div>
-                  <span className="eq-band-freq">{formatHz(freq)}</span>
+      <div className={`eq-sliders-container np-eq-sliders ${!eqState.enabled ? 'eq-disabled' : ''}`}>
+        <div className="eq-sliders-track-area">
+          <div className="eq-center-zero-line" />
+          {EQ_FREQUENCIES.map((freq, i) => {
+            const gain = eqState.gains[i] ?? 0
+            return (
+              <div key={freq} className="eq-band-col">
+                <span className="eq-band-db">
+                  {gain > 0 ? `+${gain.toFixed(0)}` : gain.toFixed(0)}
+                </span>
+                <div className="eq-slider-wrapper">
+                  <input
+                    type="range"
+                    min="-12"
+                    max="12"
+                    step="0.5"
+                    value={gain}
+                    disabled={!eqState.enabled}
+                    onChange={(e) => setEqBandGain(i, parseFloat(e.target.value))}
+                    className="eq-vertical-slider"
+                  />
                 </div>
-              )
-            })}
-          </div>
+                <span className="eq-band-freq">{formatHz(freq)}</span>
+              </div>
+            )
+          })}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Vista integrada de Marcadores de Álbumes (M:N) dentro del NowPlayingSheet
+ */
+function NowPlayingAlbumsBookmarkView({ track }) {
+  const {
+    allAlbums = [],
+    getTrackAlbumInfo,
+    addTrackToAlbums,
+    removeTrackFromAlbum,
+    createAlbum
+  } = useLibrary()
+  const [filter, setFilter] = useState('')
+  const [busyId, setBusyId] = useState(null)
+  const [newAlbumName, setNewAlbumName] = useState('')
+  const [feedback, setFeedback] = useState(null)
+
+  const albumInfo = getTrackAlbumInfo(track)
+  const presentSet = albumInfo?.albumIdsSet || new Set()
+  const presentCount = albumInfo?.albumCount || presentSet.size || 1
+
+  const sortedAlbums = useMemo(() => {
+    const q = filter.trim().toLowerCase()
+    const base = q
+      ? allAlbums.filter((a) => a.name.toLowerCase().includes(q))
+      : allAlbums
+    return [...base].sort((a, b) => {
+      const aIn = presentSet.has(a.id) ? 1 : 0
+      const bIn = presentSet.has(b.id) ? 1 : 0
+      if (aIn !== bIn) return bIn - aIn
+      return (a.name || '').localeCompare(b.name || '')
+    })
+  }, [allAlbums, filter, presentSet])
+
+  const handleToggleAlbum = async (albumItem) => {
+    if (!track || busyId) return
+    void triggerHaptic()
+    const isPresent = presentSet.has(albumItem.id)
+    if (isPresent && presentCount <= 1) {
+      setFeedback('⚠️ La pista debe pertenecer al menos a 1 álbum en la bóveda')
+      setTimeout(() => setFeedback(null), 2600)
+      return
+    }
+    setBusyId(albumItem.id)
+    try {
+      if (isPresent) {
+        await removeTrackFromAlbum(track, albumItem)
+      } else {
+        await addTrackToAlbums(track, [albumItem])
+      }
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleQuickCreateAlbum = async (e) => {
+    e.preventDefault()
+    const trimmed = newAlbumName.trim()
+    if (!trimmed || !track) return
+    void triggerHaptic()
+    const res = await createAlbum(trimmed)
+    if (res?.success && res.albumId) {
+      await addTrackToAlbums(track, [{ id: res.albumId, name: trimmed, path: res.albumPath }])
+      setNewAlbumName('')
+      setFeedback(`✓ Álbum "${trimmed}" creado y vinculado`)
+      setTimeout(() => setFeedback(null), 2500)
+    }
+  }
+
+  return (
+    <div className="np-stage-card np-bookmarks-card">
+      <div className="np-stage-card-header">
+        <div className="np-stage-card-title">
+          <span>🔖 Asignar a Álbumes ({presentCount})</span>
+        </div>
+      </div>
+
+      {feedback && <div className="np-inline-feedback">{feedback}</div>}
+
+      <form className="np-quick-create-album-row" onSubmit={handleQuickCreateAlbum}>
+        <input
+          type="text"
+          className="album-picker-search"
+          placeholder="Buscar o crear nuevo álbum..."
+          value={filter || newAlbumName}
+          onChange={(e) => {
+            setFilter(e.target.value)
+            setNewAlbumName(e.target.value)
+          }}
+        />
+        {newAlbumName.trim() && (
+          <button type="submit" className="np-mini-pill-btn primary">
+            + Crear y asignar
+          </button>
+        )}
+      </form>
+
+      <div className="np-bookmarks-list">
+        {sortedAlbums.map((alb) => {
+          const isPresent = presentSet.has(alb.id)
+          const isBusy = busyId === alb.id
+          return (
+            <button
+              key={alb.id}
+              type="button"
+              className={`np-bookmark-row ${isPresent ? 'present' : ''}`}
+              onClick={() => handleToggleAlbum(alb)}
+              disabled={isBusy}
+            >
+              <span className={`album-picker-check-box ${isPresent ? 'checked' : ''}`}>
+                {isBusy ? '…' : isPresent ? '✓' : ''}
+              </span>
+              {alb.cover ? (
+                <img src={alb.cover} alt="" className="album-picker-thumb" />
+              ) : (
+                <div className="album-picker-thumb-fallback">💿</div>
+              )}
+              <div className="album-picker-meta">
+                <span className="album-picker-name">{alb.name}</span>
+                <span className="album-picker-cat">{alb.trackCount || 0} pistas</span>
+              </div>
+              <span className={`album-picker-status ${isPresent ? 'in-album' : 'add-hint'}`}>
+                {isPresent ? 'Asignado' : '+ Asignar'}
+              </span>
+            </button>
+          )
+        })}
       </div>
     </div>
   )
@@ -309,37 +603,57 @@ function EqualizerModal({
 function Player() {
   const {
     currentTrack,
+    currentAlbum,
     isPlaying,
+    isVideoTrack,
+    bindVideoElement,
     duration,
-    volume,
     shuffle,
     loop,
     togglePlay,
     nextTrack,
     previousTrack,
     seekTo,
-    setVolumeLevel,
     toggleShuffle,
     toggleLoop,
-    eqState,
-    setEqBandGain,
-    applyEqPreset,
-    toggleEqEnabled,
-    resetEq
+    eqState
   } = usePlayback()
 
-  const [prevVolume, setPrevVolume] = useState(0.8)
+  const { getTrackAlbumInfo } = useLibrary()
+
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [activeStageTab, setActiveStageTab] = useState('cover') // 'cover' | 'lyrics' | 'eq' | 'albums'
+  const [preferCoverOverVideo, setPreferCoverOverVideo] = useState(false)
   const [showVisualizer, setShowVisualizer] = useState(() => {
     const saved = localStorage.getItem('rep_show_visualizer')
     return saved === null ? true : saved === 'true'
   })
-  const [showEqModal, setShowEqModal] = useState(false)
-  const [showLyrics, setShowLyrics] = useState(() => {
-    const saved = localStorage.getItem('rep_show_lyrics')
-    return saved === 'true'
-  })
+
+  const videoContainerRef = useRef(null)
+  const touchStartYRef = useRef(null)
+
+  const trackIsVideo = Boolean(isVideoTrack || currentTrack?.mediaType === 'video')
+
+  // Resetear preferencia de video al cambiar de pista
+  useEffect(() => {
+    setPreferCoverOverVideo(false)
+  }, [currentTrack?.id])
+
+  // Permitir que otros componentes (como AlbumView) abran el NowPlayingSheet en una pestaña específica
+  useEffect(() => {
+    const handleOpenNowPlaying = (e) => {
+      const requestedTab = e.detail?.tab
+      if (requestedTab) {
+        setActiveStageTab(requestedTab)
+      }
+      setIsExpanded(true)
+    }
+    window.addEventListener('open-now-playing', handleOpenNowPlaying)
+    return () => window.removeEventListener('open-now-playing', handleOpenNowPlaying)
+  }, [])
 
   const toggleVisualizer = useCallback(() => {
+    void triggerHaptic()
     setShowVisualizer((prev) => {
       const next = !prev
       localStorage.setItem('rep_show_visualizer', String(next))
@@ -347,233 +661,417 @@ function Player() {
     })
   }, [])
 
-  const toggleLyrics = useCallback(() => {
-    setShowLyrics((prev) => {
-      const next = !prev
-      localStorage.setItem('rep_show_lyrics', String(next))
-      return next
-    })
+  // Gestos táctiles para abrir el MiniPlayer deslizando hacia arriba
+  const handleMiniTouchStart = useCallback((e) => {
+    const touch = e.touches?.[0]
+    if (touch) touchStartYRef.current = touch.clientY
   }, [])
 
-  const closeLyrics = useCallback(() => {
-    setShowLyrics(false)
-    localStorage.setItem('rep_show_lyrics', 'false')
-  }, [])
-
-  const closeEqModal = useCallback(() => {
-    setShowEqModal(false)
-  }, [])
-
-  const handleVolumeClick = useCallback((e) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    setVolumeLevel(ratio)
-  }, [setVolumeLevel])
-
-  const toggleMute = useCallback(() => {
-    if (volume > 0) {
-      setPrevVolume(volume)
-      setVolumeLevel(0)
-    } else {
-      setVolumeLevel(prevVolume || 0.8)
+  const handleMiniTouchEnd = useCallback((e) => {
+    if (touchStartYRef.current === null) return
+    const touch = e.changedTouches?.[0]
+    if (touch) {
+      const deltaY = touch.clientY - touchStartYRef.current
+      if (deltaY < -28) {
+        void triggerHaptic()
+        setIsExpanded(true)
+      }
     }
-  }, [volume, prevVolume, setVolumeLevel])
+    touchStartYRef.current = null
+  }, [])
 
-  const handleVolumeWheel = useCallback((e) => {
-    e.preventDefault()
-    const step = 0.05
-    const delta = e.deltaY < 0 ? step : -step
-    const nextVol = Math.max(0, Math.min(1, Math.round((volume + delta) * 100) / 100))
-    setVolumeLevel(nextVol)
-  }, [volume, setVolumeLevel])
+  // Gestos táctiles para contraer el NowPlayingSheet deslizando hacia abajo desde la cabecera
+  const handleSheetHeaderTouchStart = useCallback((e) => {
+    const touch = e.touches?.[0]
+    if (touch) touchStartYRef.current = touch.clientY
+  }, [])
+
+  const handleSheetHeaderTouchEnd = useCallback((e) => {
+    if (touchStartYRef.current === null) return
+    const touch = e.changedTouches?.[0]
+    if (touch) {
+      const deltaY = touch.clientY - touchStartYRef.current
+      if (deltaY > 45) {
+        void triggerHaptic()
+        setIsExpanded(false)
+      }
+    }
+    touchStartYRef.current = null
+  }, [])
+
+  const handleFullscreenVideo = useCallback(() => {
+    const el = videoContainerRef.current?.querySelector('video') || videoContainerRef.current
+    if (!el) return
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.().catch(() => {})
+    } else {
+      el.requestFullscreen?.().catch(() => {})
+    }
+  }, [])
+
+  const albumInfo = currentTrack ? getTrackAlbumInfo(currentTrack) : null
+  const albumCount = albumInfo?.albumCount || currentTrack?.albumCount || 1
+
+  if (!currentTrack) {
+    return null
+  }
 
   return (
-    <div className="player-wrapper">
-      {/* Visualizador de espectro real en tiempo real */}
-      {showVisualizer && currentTrack && (
-        <div className="player-visualizer-dock">
-          <AudioVisualizer height={38} barCount={46} />
-        </div>
-      )}
+    <>
+      {/* 1. MINIPLAYER ACOPLADO ENCIMA DE BOTTOMNAVBAR (~64px) */}
+      <div
+        className={`mobile-mini-player ${isExpanded ? 'sheet-open' : ''}`}
+        onTouchStart={handleMiniTouchStart}
+        onTouchEnd={handleMiniTouchEnd}
+        onClick={() => {
+          void triggerHaptic()
+          setIsExpanded(true)
+        }}
+        role="region"
+        aria-label="Mini reproductor"
+      >
+        <MiniPlayerProgressBar duration={duration} />
 
-      <div className="player">
-        {/* 1. Track Info (Carátula grande, título, artista) */}
-      <div className="player-track-info">
-        {currentTrack?.cover ? (
-          <React.Fragment key={currentTrack.cover}>
-            <img
-              src={currentTrack.cover}
-              alt=""
-              className="player-cover"
-              decoding="async"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none'
-                const fb = e.currentTarget.parentElement?.querySelector('.player-cover-placeholder')
-                if (fb) fb.style.display = 'flex'
-              }}
-            />
-            <div className="player-cover-placeholder" style={{ display: 'none' }}>💿</div>
-          </React.Fragment>
-        ) : (
-          <div className="player-cover-placeholder">💿</div>
-        )}
-        <div className="player-text">
-          <div className="player-title" title={currentTrack?.title || 'Sin reproducción'}>
-            {currentTrack?.title || 'Selecciona una canción'}
+        <div className="mini-player-content">
+          <div className="mini-player-thumb-wrap">
+            {currentTrack.cover ? (
+              <img
+                src={currentTrack.cover}
+                alt=""
+                className="mini-player-thumb"
+                decoding="async"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none'
+                }}
+              />
+            ) : (
+              <div className="mini-player-thumb-placeholder">
+                {trackIsVideo ? '🎬' : '💿'}
+              </div>
+            )}
+            {trackIsVideo && <span className="mini-player-video-badge">🎬</span>}
           </div>
-          <div className="player-artist-row">
-            <span className="player-artist" title={currentTrack?.artist || '—'}>
-              {currentTrack?.artist || '—'}
-            </span>
-            {currentTrack?.hasLyrics && (
-              <span
-                className={`player-lyrics-indicator ${currentTrack.syncedLyrics ? 'synced' : 'plain'}`}
-                title={currentTrack.syncedLyrics ? 'Letras sincronizadas disponibles (clic para ver)' : 'Letras disponibles (clic para ver)'}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  toggleLyrics()
+
+          <div className="mini-player-meta">
+            <div className="mini-player-title">{currentTrack.title || 'Sin título'}</div>
+            <div className="mini-player-artist">
+              <span>{currentTrack.artist || 'Artista desconocido'}</span>
+              {albumCount > 1 && (
+                <span className="mini-player-album-pill">🔖 {albumCount}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="mini-player-actions" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="mini-player-touch-btn play-btn"
+              onClick={() => {
+                void triggerHaptic()
+                togglePlay()
+              }}
+              aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
+            >
+              {isPlaying ? <Icons.Pause /> : <Icons.Play />}
+            </button>
+
+            <button
+              type="button"
+              className="mini-player-touch-btn next-btn"
+              onClick={() => {
+                void triggerHaptic()
+                nextTrack()
+              }}
+              aria-label="Siguiente canción"
+            >
+              <Icons.Next />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. BOTTOMSHEET DESLIZABLE "NOW PLAYING" A PANTALLA COMPLETA */}
+      {isExpanded && (
+        <div className="now-playing-sheet-backdrop" onClick={() => setIsExpanded(false)}>
+          <div
+            className="now-playing-sheet"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Reproduciendo ahora"
+          >
+            {/* Resplandor ambiental dinámico basado en la carátula */}
+            {currentTrack.cover && (
+              <div
+                className="now-playing-ambient-bg"
+                style={{ backgroundImage: `url("${currentTrack.cover}")` }}
+              />
+            )}
+
+            {/* Cabecera con Pill Handle, álbum actual y botón de Marcadores */}
+            <div
+              className="now-playing-sheet-header"
+              onTouchStart={handleSheetHeaderTouchStart}
+              onTouchEnd={handleSheetHeaderTouchEnd}
+            >
+              <div className="now-playing-pill-handle" />
+
+              <div className="now-playing-top-bar">
+                <button
+                  type="button"
+                  className="np-icon-touch-btn"
+                  onClick={() => {
+                    void triggerHaptic()
+                    setIsExpanded(false)
+                  }}
+                  aria-label="Contraer reproductor"
+                  title="Contraer"
+                >
+                  <span style={{ fontSize: '22px', lineHeight: 1 }}>⌄</span>
+                </button>
+
+                <div className="now-playing-header-center">
+                  <span className="np-playing-from-label">
+                    {trackIsVideo ? '🎬 VIDEO EN REPRODUCCIÓN' : 'REPRODUCIENDO DESDE'}
+                  </span>
+                  <span className="np-playing-album-name">
+                    {currentAlbum?.name || currentTrack.albumName || 'Biblioteca'}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  className={`np-icon-touch-btn np-bookmark-top-btn ${activeStageTab === 'albums' ? 'active' : ''}`}
+                  onClick={() => {
+                    void triggerHaptic()
+                    setActiveStageTab((prev) => (prev === 'albums' ? 'cover' : 'albums'))
+                  }}
+                  aria-label="Gestionar álbumes de esta canción"
+                  title="Asignar o quitar de álbumes (M:N)"
+                >
+                  <Icons.Bookmark filled={albumCount > 1 || activeStageTab === 'albums'} />
+                  {albumCount > 1 && <span className="np-bookmark-count">{albumCount}</span>}
+                </button>
+              </div>
+            </div>
+
+            {/* Zona Central Multimedia (Carátula / Video / Letras / EQ / Álbumes) */}
+            <div className="now-playing-stage">
+              {activeStageTab === 'cover' && (
+                <div className="np-cover-video-stage">
+                  {trackIsVideo && (
+                    <div className="np-media-mode-switch">
+                      <button
+                        type="button"
+                        className={`np-mode-pill ${!preferCoverOverVideo ? 'active' : ''}`}
+                        onClick={() => setPreferCoverOverVideo(false)}
+                      >
+                        🎬 Video
+                      </button>
+                      <button
+                        type="button"
+                        className={`np-mode-pill ${preferCoverOverVideo ? 'active' : ''}`}
+                        onClick={() => setPreferCoverOverVideo(true)}
+                      >
+                        💿 Carátula
+                      </button>
+                      {!preferCoverOverVideo && (
+                        <button
+                          type="button"
+                          className="np-mode-pill"
+                          onClick={handleFullscreenVideo}
+                          title="Pantalla completa"
+                        >
+                          ⛶ Pantalla completa
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {trackIsVideo && !preferCoverOverVideo ? (
+                    <div className="np-video-wrapper" ref={videoContainerRef}>
+                      <video
+                        ref={bindVideoElement}
+                        className="np-video-player"
+                        playsInline
+                        muted
+                        onClick={togglePlay}
+                      />
+                    </div>
+                  ) : (
+                    <div className="np-artwork-showcase">
+                      {currentTrack.cover ? (
+                        <img
+                          src={currentTrack.cover}
+                          alt={currentTrack.title}
+                          className="np-artwork-img"
+                          decoding="async"
+                        />
+                      ) : (
+                        <div className="np-artwork-placeholder">
+                          {trackIsVideo ? '🎬' : '💿'}
+                        </div>
+                      )}
+
+                      {showVisualizer && (
+                        <div className="np-visualizer-overlay">
+                          <AudioVisualizer height={44} barCount={40} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeStageTab === 'lyrics' && (
+                <NowPlayingLyricsView currentTrack={currentTrack} seekTo={seekTo} />
+              )}
+
+              {activeStageTab === 'eq' && <NowPlayingEqualizerView />}
+
+              {activeStageTab === 'albums' && (
+                <NowPlayingAlbumsBookmarkView track={currentTrack} />
+              )}
+            </div>
+
+            {/* Información de la pista actual */}
+            <div className="now-playing-track-meta">
+              <div className="np-track-text">
+                <h2 className="np-track-title">{currentTrack.title || 'Sin título'}</h2>
+                <p className="np-track-artist">{currentTrack.artist || 'Artista desconocido'}</p>
+              </div>
+
+              <button
+                type="button"
+                className={`np-visualizer-toggle-btn ${showVisualizer ? 'active' : ''}`}
+                onClick={toggleVisualizer}
+                title="Alternar visualizador de espectro"
+                aria-label="Alternar visualizador de espectro"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2V3h-2v16zm4 0h2v-8h-2v8zm4 0h2v-4h-2v4z" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Scrubber táctil */}
+            <div className="now-playing-scrubber-box">
+              <PlayerTimeline duration={duration} isPlaying={isPlaying} seekTo={seekTo} />
+            </div>
+
+            {/* Controles Principales Grandes (Shuffle, Prev, Play/Pause 64px, Next, Repeat) */}
+            <div className="now-playing-main-controls">
+              <button
+                type="button"
+                className={`np-control-btn secondary ${shuffle ? 'active' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  toggleShuffle()
+                }}
+                aria-label="Aleatorio"
+              >
+                <Icons.Shuffle />
+              </button>
+
+              <button
+                type="button"
+                className="np-control-btn transport"
+                onClick={() => {
+                  void triggerHaptic()
+                  previousTrack()
+                }}
+                aria-label="Anterior"
+              >
+                <Icons.Previous />
+              </button>
+
+              <button
+                type="button"
+                className="np-control-btn primary-play"
+                onClick={() => {
+                  void triggerHaptic()
+                  togglePlay()
+                }}
+                aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
+              >
+                {isPlaying ? <Icons.Pause /> : <Icons.Play />}
+              </button>
+
+              <button
+                type="button"
+                className="np-control-btn transport"
+                onClick={() => {
+                  void triggerHaptic()
+                  nextTrack()
+                }}
+                aria-label="Siguiente"
+              >
+                <Icons.Next />
+              </button>
+
+              <button
+                type="button"
+                className={`np-control-btn secondary ${loop !== 'none' ? 'active' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  toggleLoop()
+                }}
+                aria-label="Repetir"
+              >
+                {loop === 'one' ? <Icons.LoopOne /> : <Icons.Loop />}
+              </button>
+            </div>
+
+            {/* Pestañas inferiores del reproductor: Carátula | Letras 🎤 | EQ 🎚️ | Álbumes 🔖 */}
+            <div className="now-playing-bottom-tabs">
+              <button
+                type="button"
+                className={`np-tab-pill ${activeStageTab === 'cover' ? 'active' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  setActiveStageTab('cover')
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                  <line x1="12" y1="19" x2="12" y2="22" />
-                </svg>
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
+                <span>{trackIsVideo ? '🎬 Video / Arte' : '💿 Carátula'}</span>
+              </button>
 
-      {/* 2. Controls & Interactive Timeline */}
-      <div className="player-controls">
-        <div className="player-buttons">
-          <button
-            className={`player-btn ${shuffle ? 'active' : ''}`}
-            onClick={toggleShuffle}
-            title={shuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
-          >
-            <Icons.Shuffle />
-          </button>
+              <button
+                type="button"
+                className={`np-tab-pill ${activeStageTab === 'lyrics' ? 'active' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  setActiveStageTab('lyrics')
+                }}
+              >
+                <span>Letras 🎤</span>
+              </button>
 
-          <button className="player-btn" onClick={previousTrack} title="Canción anterior (Ctrl+Left)">
-            <Icons.Previous />
-          </button>
+              <button
+                type="button"
+                className={`np-tab-pill ${activeStageTab === 'eq' ? 'active' : ''} ${eqState?.enabled ? 'eq-on' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  setActiveStageTab('eq')
+                }}
+              >
+                <span>EQ 🎚️</span>
+              </button>
 
-          <button
-            className="player-btn play-pause-btn"
-            onClick={togglePlay}
-            title={isPlaying ? 'Pausar' : 'Reproducir'}
-          >
-            {isPlaying ? <Icons.Pause /> : <Icons.Play />}
-          </button>
-
-          <button className="player-btn" onClick={nextTrack} title="Siguiente canción (Ctrl+Right)">
-            <Icons.Next />
-          </button>
-
-          <button
-            className={`player-btn ${loop !== 'none' ? 'active' : ''}`}
-            onClick={toggleLoop}
-            title={
-              loop === 'none'
-                ? 'Bucle desactivado'
-                : loop === 'all'
-                ? 'Repetir álbum completo'
-                : 'Repetir canción actual'
-            }
-          >
-            {loop === 'one' ? <Icons.LoopOne /> : <Icons.Loop />}
-          </button>
-        </div>
-
-        {/* BARRA DE MÚSICA CON DISEÑO PREMIUM ULTRA VISTOSA */}
-        <PlayerTimeline duration={duration} isPlaying={isPlaying} seekTo={seekTo} />
-      </div>
-
-      {/* 3. Volume slider with mouse wheel support & Visualizer Toggle */}
-      <div
-        className="player-extra"
-        onWheel={handleVolumeWheel}
-        title="Usa la rueda del ratón para ajustar el volumen"
-      >
-        {/* Botón Ecualizador de 10 Bandas */}
-        <button
-          className={`player-btn eq-btn ${showEqModal ? 'active' : ''} ${eqState?.enabled ? 'eq-powered' : ''}`}
-          onClick={() => setShowEqModal(prev => !prev)}
-          title={eqState?.enabled ? `Ecualizador: Activado (${eqState.preset})` : 'Ecualizador de audio de 10 bandas'}
-        >
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />
-            <line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" />
-            <line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" />
-            <line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
-          </svg>
-        </button>
-
-        {/* Columna vertical compacta: Visualizador (arriba) y Letras (abajo) */}
-        <div className="player-twin-stack">
-          <button
-            className={`player-btn visualizer-btn mini-btn ${showVisualizer ? 'active' : ''}`}
-            onClick={toggleVisualizer}
-            title={showVisualizer ? 'Ocultar visualizador de espectro' : 'Mostrar visualizador de espectro'}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M4 19h2V5H4v14zm4 0h2V9H8v10zm4 0h2V3h-2v16zm4 0h2v-8h-2v8zm4 0h2v-4h-2v4z"/>
-            </svg>
-          </button>
-
-          <button
-            className={`player-btn lyrics-btn mini-btn ${showLyrics ? 'active' : ''}`}
-            onClick={toggleLyrics}
-            title={showLyrics ? 'Ocultar letras (LRC / ID3)' : 'Mostrar letras sincronizadas (LRC / ID3)'}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="22" />
-            </svg>
-          </button>
-        </div>
-
-        <button className="player-btn volume-btn" onClick={toggleMute} title={volume === 0 ? 'Activar sonido' : 'Silenciar'}>
-          {volume === 0 ? <Icons.Mute /> : <Icons.Volume />}
-        </button>
-        <div className="volume-slider-hitbox" onClick={handleVolumeClick} title={`Volumen: ${Math.round(volume * 100)}% (o rueda del ratón)`}>
-          <div className="volume-slider-track">
-            <div className="volume-fill" style={{ width: `${volume * 100}%` }}>
-              <div className="volume-thumb" />
+              <button
+                type="button"
+                className={`np-tab-pill ${activeStageTab === 'albums' ? 'active' : ''}`}
+                onClick={() => {
+                  void triggerHaptic()
+                  setActiveStageTab('albums')
+                }}
+              >
+                <span>Álbumes 🔖 {albumCount > 1 ? `(${albumCount})` : ''}</span>
+              </button>
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Modal del Ecualizador */}
-      {showEqModal && (
-        <EqualizerModal
-          isOpen={showEqModal}
-          onClose={closeEqModal}
-          eqState={eqState}
-          setEqBandGain={setEqBandGain}
-          applyEqPreset={applyEqPreset}
-          toggleEqEnabled={toggleEqEnabled}
-          resetEq={resetEq}
-          EQ_FREQUENCIES={EQ_FREQUENCIES}
-          EQ_PRESETS={EQ_PRESETS}
-        />
       )}
-
-      {/* Dock Flotante de Letras (3 Líneas / Modo Expandido): se monta solo cuando está visible para evitar suscribir currentTime en vano */}
-      {showLyrics && (
-        <LyricsDock
-          isOpen={showLyrics}
-          onClose={closeLyrics}
-          currentTrack={currentTrack}
-          seekTo={seekTo}
-        />
-      )}
-    </div>
-  </div>
+    </>
   )
 }
 

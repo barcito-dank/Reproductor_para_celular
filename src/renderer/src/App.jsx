@@ -1,31 +1,19 @@
 import React, { useState, useEffect, useCallback, Suspense, lazy, memo } from 'react'
 import { PlayerProvider, useLibrary, usePlayback } from './context/PlayerContext'
+import BottomNavBar, { triggerHaptic } from './components/BottomNavBar'
 
-const initialHash = window.location.hash
-const isSecondaryWindow =
-  initialHash === '#/mini' ||
-  initialHash === '#/notification' ||
-  initialHash === '#/overlay'
+const sidebarPromise = import('./components/Sidebar')
+const albumViewPromise = import('./components/AlbumView')
+const playerPromise = import('./components/Player')
 
-// En la ventana principal, iniciar precarga paralela inmediata en t=0ms (cero cascada de carga).
-// En ventanas secundarias (MiniPanel, Toast, Overlay), jamás se descargan ni compilan en V8.
-const sidebarPromise = !isSecondaryWindow ? import('./components/Sidebar') : null
-const albumViewPromise = !isSecondaryWindow ? import('./components/AlbumView') : null
-const playerPromise = !isSecondaryWindow ? import('./components/Player') : null
-
-const Sidebar = lazy(() => sidebarPromise || import('./components/Sidebar'))
-const AlbumView = lazy(() => albumViewPromise || import('./components/AlbumView'))
-const Player = lazy(() => playerPromise || import('./components/Player'))
-const MiniPanel = lazy(() => import('./components/MiniPanel'))
-const ToastNotification = lazy(() => import('./components/ToastNotification'))
-const GameOverlay = lazy(() => import('./components/GameOverlay'))
+const Sidebar = lazy(() => sidebarPromise)
+const AlbumView = lazy(() => albumViewPromise)
+const Player = lazy(() => playerPromise)
 const SpotlightSearch = lazy(() => import('./components/SpotlightSearch'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
-const ExtractorModal = lazy(() => import('./components/ExtractorModal'))
 
 /**
  * Subcomponente aislado para el resplandor ambiental de fondo.
- * Evita que MainPlayerApp re-renderice toda la estructura al cambiar de canción o de álbum.
  */
 const AmbientBackdrop = memo(function AmbientBackdrop() {
   const { selectedAlbum } = useLibrary()
@@ -43,107 +31,39 @@ const AmbientBackdrop = memo(function AmbientBackdrop() {
 })
 
 function MainPlayerApp({ theme, onThemeChange }) {
+  const [activeNavTab, setActiveNavTab] = useState('home') // 'home' | 'albums' | 'search' | 'settings'
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
-  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
-  const [isSpotlightOpen, setIsSpotlightOpen] = useState(false)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [isExtractorOpen, setIsExtractorOpen] = useState(false)
-  const { updateMusicDirectory } = useLibrary()
-  const { togglePlay, adjustVolume } = usePlayback()
+  const [importToast, setImportToast] = useState(null)
+
+  const { selectedAlbum, allAlbums = [], importFilesToVault } = useLibrary()
+  const { togglePlay, adjustVolume, currentTrack } = usePlayback()
 
   const handleToggleSidebar = useCallback(() => {
     setIsSidebarOpen((prev) => !prev)
   }, [])
 
-  const handleCloseSpotlight = useCallback(() => {
-    setIsSpotlightOpen(false)
-  }, [])
-
-  const handleCloseSettings = useCallback(() => {
-    setIsSettingsOpen(false)
-  }, [])
-
-  const handleCloseExtractor = useCallback(() => {
-    setIsExtractorOpen(false)
-  }, [])
-
-  const [isRestored, setIsRestored] = useState(false)
-
-  // Efecto suave de transición al restaurar la ventana desde el estado minimizado
-  useEffect(() => {
-    let unsub = null
-    let timer = null
-    if (window.electronAPI?.onMainWindowVisibility) {
-      unsub = window.electronAPI.onMainWindowVisibility((visible) => {
-        if (visible) {
-          setIsRestored(true)
-          if (timer) clearTimeout(timer)
-          timer = setTimeout(() => setIsRestored(false), 260)
-        }
-      })
+  const handleQuickImport = useCallback(async () => {
+    void triggerHaptic()
+    const targetId =
+      selectedAlbum && !selectedAlbum.isAllTracks ? selectedAlbum.id : undefined
+    const res = await importFilesToVault?.(targetId)
+    if (res && res.success && res.importedCount > 0) {
+      setImportToast(
+        `✓ ${res.importedCount} ${res.importedCount === 1 ? 'pista importada' : 'pistas importadas'}`
+      )
+      setTimeout(() => setImportToast(null), 2600)
     }
-    return () => {
-      if (timer) clearTimeout(timer)
-      if (unsub) unsub()
-    }
-  }, [])
+  }, [selectedAlbum, importFilesToVault])
 
-  // Sincronizar visibilidad del Panel Lateral
-  useEffect(() => {
-    let unsubPanelMode = null
-    if (window.electronAPI?.onSidePanelMode) {
-      unsubPanelMode = window.electronAPI.onSidePanelMode((mode) => {
-        setIsSidePanelOpen(mode === 'expanded')
-      })
-    }
-    return () => {
-      if (unsubPanelMode) unsubPanelMode()
-    }
-  }, [])
-
-  const handleBrowseMusicDirectory = useCallback(async () => {
-    try {
-      const directory = await window.electronAPI?.selectMusicDirectory?.()
-      if (directory) {
-        await updateMusicDirectory(directory)
-      }
-    } catch (err) {
-      console.error('Error seleccionando el directorio de música:', err)
-    }
-  }, [updateMusicDirectory])
-
-  // Atajos de teclado en la ventana principal
+  // Atajos opcionales si se conecta teclado externo o en vista previa web
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Bloquear teclas F1 y F2 para neutralizar ayuda del navegador o interferencias
-      if (e.key === 'F1' || e.key === 'F2') {
-        e.preventDefault()
-        e.stopPropagation()
-        return
-      }
-
-      // Atajo global para Buscador Spotlight (Ctrl+K o Ctrl+F)
       if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
-        setIsSpotlightOpen((prev) => !prev)
+        setActiveNavTab((prev) => (prev === 'search' ? 'home' : 'search'))
         return
       }
 
-      // Atajo Ctrl+D para Descargar / Pegar Enlace (Extractor)
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
-        e.preventDefault()
-        setIsExtractorOpen((prev) => !prev)
-        return
-      }
-
-      // Atajo Ctrl+Space (o Cmd+Space) para pausar / despausar en cualquier momento
-      if ((e.ctrlKey || e.metaKey) && e.code === 'Space') {
-        e.preventDefault()
-        togglePlay()
-        return
-      }
-
-      // Ignorar controles de reproducción si el usuario está escribiendo en un input o campo de búsqueda
       const activeTag = document.activeElement?.tagName?.toLowerCase()
       if (activeTag === 'input' || activeTag === 'textarea') return
 
@@ -163,136 +83,160 @@ function MainPlayerApp({ theme, onThemeChange }) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [togglePlay, adjustVolume])
 
+  const headerTitle =
+    activeNavTab === 'home'
+      ? selectedAlbum?.name || 'Mis Pistas'
+      : activeNavTab === 'albums'
+        ? 'Álbumes y Carpetas'
+        : activeNavTab === 'search'
+          ? 'Buscar Música'
+          : 'Ajustes'
+
+  const headerSub =
+    activeNavTab === 'home'
+      ? selectedAlbum?.trackCount !== undefined
+        ? `${selectedAlbum.trackCount} pistas en álbum`
+        : 'Bóveda Musical'
+      : activeNavTab === 'albums'
+        ? `${allAlbums.length} álbumes en la bóveda`
+        : activeNavTab === 'search'
+          ? 'Búsqueda instantánea'
+          : 'Configuración de la app'
+
   return (
-    <div className={`app ${isRestored ? 'window-restored' : ''}`}>
-      {/* Barra de título personalizada con jerarquía visual equilibrada */}
-      <header className="titlebar">
-        <div className="titlebar-drag">
-          <span className="titlebar-title">🎵 Reproductor de Música</span>
+    <div className={`app ${currentTrack ? 'has-active-track' : ''}`}>
+      {/* Header Móvil Limpio con soporte para safe-area-inset-top */}
+      <header className="mobile-app-header">
+        <div className="mobile-header-left">
+          <div className="mobile-header-logo" onClick={() => setActiveNavTab('home')}>
+            🎵
+          </div>
+          <div className="mobile-header-titles">
+            <h1 className="mobile-header-title">{headerTitle}</h1>
+            <span className="mobile-header-subtitle">{headerSub}</span>
+          </div>
         </div>
 
-        {/* Centro: Buscador Global Spotlight */}
-        <div className="titlebar-center">
+        <div className="mobile-header-actions">
           <button
-            className="titlebar-spotlight-btn"
-            onClick={() => setIsSpotlightOpen(true)}
-            title="Buscador global en toda la biblioteca (Ctrl+K)"
+            type="button"
+            className="mobile-header-import-btn"
+            onClick={handleQuickImport}
+            title="Importar música o video a la bóveda"
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-            </svg>
-            <span>Buscar música...</span>
-            <kbd className="titlebar-kbd">Ctrl+K</kbd>
+            <span>+ Importar</span>
           </button>
-        </div>
 
-        <div className="titlebar-right">
-          <div className="titlebar-actions">
-            {/* Botón para desplegar/ocultar el Panel Lateral Rápido (sincronizado en tiempo real) */}
-            <button
-              className={`titlebar-side-btn ${isSidePanelOpen ? 'active-panel' : ''}`}
-              onClick={() => window.electronAPI.toggleSidePanel()}
-              title="Panel lateral de navegación rápida (Ctrl+Shift+M / Ctrl+Alt+M)"
-              aria-pressed={isSidePanelOpen}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M4 18h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2zm12-10h4v8h-4V8z"/>
-              </svg>
-              <span>Panel Rápido</span>
-            </button>
+          <button
+            type="button"
+            className={`mobile-header-icon-btn ${activeNavTab === 'search' ? 'active' : ''}`}
+            onClick={() => {
+              void triggerHaptic()
+              setActiveNavTab((prev) => (prev === 'search' ? 'home' : 'search'))
+            }}
+            aria-label="Buscar"
+            title="Buscar"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+          </button>
 
-            {/* Botón para invocar Extractor de Música (Descargar / Pegar Enlace) */}
-            <button
-              className="titlebar-extractor-btn"
-              onClick={() => setIsExtractorOpen(true)}
-              title="Descargar o pegar enlace para extraer música con metadatos oficiales (YouTube, Spotify, TikTok)"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
-              </svg>
-              <span>Descargar</span>
-            </button>
-
-            {/* Botón de Ajustes */}
-            <button
-              className={`titlebar-settings-btn ${isSettingsOpen ? 'active' : ''}`}
-              onClick={() => setIsSettingsOpen(true)}
-              title="Ajustes y configuración avanzada"
-              aria-label="Ajustes"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
-                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.94-.08-.02a1.7 1.7 0 0 0-1.77.49l-.06.06h-3.4l-.03-.08a1.7 1.7 0 0 0-1.43-1.14h-.08l-1.7-2.94.05-.06a1.7 1.7 0 0 0 .1-1.8l-.04-.07 1.7-2.94h.08a1.7 1.7 0 0 0 1.48-.98l.04-.08h3.4l.04.08a1.7 1.7 0 0 0 1.48.98h.08l1.7 2.94-.05.07A1.7 1.7 0 0 0 19.4 15Z" />
-              </svg>
-            </button>
-          </div>
-
-          <div className="titlebar-divider" aria-hidden="true" />
-
-          <div className="titlebar-controls">
-            <button className="titlebar-btn" onClick={() => window.electronAPI.minimizeWindow()} title="Minimizar (Despliega Panel Lateral)">
-              <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="2" fill="currentColor"/></svg>
-            </button>
-            <button className="titlebar-btn" onClick={() => window.electronAPI.maximizeWindow()} title="Maximizar">
-              <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>
-            </button>
-            <button className="titlebar-btn close-btn" onClick={() => window.electronAPI.closeWindow()} title="Cerrar">
-              <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1L11 11M11 1L1 11" stroke="currentColor" strokeWidth="1.5"/></svg>
-            </button>
-          </div>
+          <button
+            type="button"
+            className="mobile-header-icon-btn"
+            onClick={() => {
+              void triggerHaptic()
+              onThemeChange(theme === 'dark' ? 'light' : 'dark')
+            }}
+            aria-label="Cambiar tema"
+            title={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+          >
+            {theme === 'dark' ? '🌙' : '☀️'}
+          </button>
         </div>
       </header>
 
-      {/* Contenido principal con Fondo Ambiental Dinámico fijo (no repinta al hacer scroll) */}
+      {importToast && (
+        <div className="track-action-feedback-toast" role="status">
+          {importToast}
+        </div>
+      )}
+
+      {/* Escenario Principal según pestaña activa */}
       <Suspense fallback={null}>
         <div className="app-content">
-          <Sidebar isOpen={isSidebarOpen} onToggle={handleToggleSidebar} />
-          <div className="main-stage">
-            <AmbientBackdrop />
-            <main className="main-view">
-              <AlbumView />
-            </main>
-          </div>
+          {activeNavTab === 'home' && (
+            <>
+              <div className="desktop-only-sidebar">
+                <Sidebar isOpen={isSidebarOpen} onToggle={handleToggleSidebar} />
+              </div>
+              <div className="main-stage">
+                <AmbientBackdrop />
+                <main className="main-view">
+                  <AlbumView />
+                </main>
+              </div>
+            </>
+          )}
+
+          {activeNavTab === 'albums' && (
+            <div className="main-stage">
+              <AmbientBackdrop />
+              <main className="main-view mobile-albums-full-stage">
+                <Sidebar
+                  isOpen={true}
+                  isMobileFullView={true}
+                  onAlbumSelected={() => setActiveNavTab('home')}
+                />
+              </main>
+            </div>
+          )}
+
+          {activeNavTab === 'search' && (
+            <div className="main-stage">
+              <AmbientBackdrop />
+              <main className="main-view">
+                <SpotlightSearch
+                  isOpen={true}
+                  inline={true}
+                  onNavigateToHome={() => setActiveNavTab('home')}
+                />
+              </main>
+            </div>
+          )}
+
+          {activeNavTab === 'settings' && (
+            <div className="main-stage">
+              <AmbientBackdrop />
+              <main className="main-view">
+                <SettingsModal
+                  isOpen={true}
+                  inline={true}
+                  theme={theme}
+                  onThemeChange={onThemeChange}
+                />
+              </main>
+            </div>
+          )}
         </div>
 
-        {/* Barra del reproductor */}
+        {/* MiniPlayer acoplado + BottomSheet NowPlaying */}
         <Player />
       </Suspense>
 
-      {/* Modales bajo demanda: solo se montan y suscriben a contexto cuando están abiertos */}
-      <Suspense fallback={null}>
-        {isSpotlightOpen && (
-          <SpotlightSearch
-            isOpen={isSpotlightOpen}
-            onClose={handleCloseSpotlight}
-          />
-        )}
-
-        {isSettingsOpen && (
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={handleCloseSettings}
-            theme={theme}
-            onThemeChange={onThemeChange}
-            onBrowseDirectory={handleBrowseMusicDirectory}
-          />
-        )}
-
-        {isExtractorOpen && (
-          <ExtractorModal
-            isOpen={isExtractorOpen}
-            onClose={handleCloseExtractor}
-          />
-        )}
-      </Suspense>
+      {/* Barra de Navegación Inferior Móvil Fija */}
+      <BottomNavBar
+        activeTab={activeNavTab}
+        onSelectTab={setActiveNavTab}
+        albumCount={allAlbums.length}
+      />
     </div>
   )
 }
 
 function App() {
-  const isMini = window.location.hash === '#/mini'
-  const isNotification = window.location.hash === '#/notification'
-  const isOverlay = window.location.hash === '#/overlay'
   const [theme, setTheme] = useState(() => {
     const savedTheme = window.localStorage.getItem('musicPlayerTheme')
     return savedTheme === 'light' ? 'light' : 'dark'
@@ -300,71 +244,8 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    if (!isMini && !isNotification && !isOverlay) {
-      window.localStorage.setItem('musicPlayerTheme', theme)
-      window.electronAPI?.sendPlayerCommand?.(`theme-${theme}`)
-    }
-  }, [theme, isMini, isNotification, isOverlay])
-
-  // Sincronizar cambios de tema en tiempo real hacia la barra lateral (MiniPanel) y notificaciones
-  useEffect(() => {
-    const handleStorage = (e) => {
-      if (e.key === 'musicPlayerTheme' && e.newValue) {
-        setTheme(e.newValue === 'light' ? 'light' : 'dark')
-      }
-    }
-    window.addEventListener('storage', handleStorage)
-
-    let unsubCmd = null
-    if (window.electronAPI?.onPlayerCommand) {
-      unsubCmd = window.electronAPI.onPlayerCommand((cmd) => {
-        if (typeof cmd === 'string' && cmd.startsWith('theme-')) {
-          const nextTheme = cmd.replace('theme-', '') === 'light' ? 'light' : 'dark'
-          setTheme(nextTheme)
-        }
-      })
-    }
-
-    return () => {
-      window.removeEventListener('storage', handleStorage)
-      if (unsubCmd) unsubCmd()
-    }
-  }, [])
-
-  useEffect(() => {
-    if (isMini || isNotification || isOverlay) {
-      document.documentElement.style.background = 'transparent'
-      document.body.style.background = 'transparent'
-    }
-  }, [isMini, isNotification, isOverlay])
-
-  if (isNotification) {
-    return (
-      <Suspense fallback={null}>
-        <ToastNotification />
-      </Suspense>
-    )
-  }
-
-  if (isOverlay) {
-    return (
-      <PlayerProvider isMiniPanel={true}>
-        <Suspense fallback={null}>
-          <GameOverlay />
-        </Suspense>
-      </PlayerProvider>
-    )
-  }
-
-  if (isMini) {
-    return (
-      <PlayerProvider isMiniPanel={true}>
-        <Suspense fallback={null}>
-          <MiniPanel />
-        </Suspense>
-      </PlayerProvider>
-    )
-  }
+    window.localStorage.setItem('musicPlayerTheme', theme)
+  }, [theme])
 
   return (
     <PlayerProvider>
